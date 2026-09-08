@@ -4,6 +4,8 @@
   import { bytes } from '../lib/format';
   import Confirm from '../components/Confirm.svelte';
 
+  let { go } = $props<{ go: (to: string) => void }>();
+
   type Peer = {
     id: string;
     name: string;
@@ -137,7 +139,7 @@
     disabled={!status?.privileged}
   />
 </label>
-<p class="hint">Hostname or public IP of the router on the internet. The listen port is added automatically. Use dynamic DNS if the ISP address changes.</p>
+<p class="hint">Hostname or public IP of the router on the internet. The listen port is added automatically. If the ISP address changes, set that hostname under <button type="button" class="linkish" onclick={() => go('/settings/ddns')}>DDNS</button>.</p>
 <label class="field"><span>DNS for clients</span>
   <input
     value={status?.dns ?? ''}

@@ -8,6 +8,7 @@
   import Storage from './Storage.svelte';
   import Network from './Network.svelte';
   import Vpn from './Vpn.svelte';
+  import Ddns from './Ddns.svelte';
   import Proxy from './Proxy.svelte';
   import Services from './Services.svelte';
 
@@ -81,6 +82,7 @@
     { id: 'storage', label: 'Storage', icon: appIcons.storage },
     { id: 'network', label: 'Network', icon: appIcons.network },
     { id: 'vpn', label: 'VPN', icon: appIcons.vpn },
+    { id: 'ddns', label: 'DDNS', icon: appIcons.ddns },
     { id: 'proxy', label: 'Proxy', icon: appIcons.proxy },
     { id: 'services', label: 'Services', icon: appIcons.services }
   ];
@@ -497,7 +499,9 @@
     {:else if active === 'network'}
       <Network />
     {:else if active === 'vpn'}
-      <Vpn />
+      <Vpn {go} />
+    {:else if active === 'ddns'}
+      <Ddns {go} />
     {:else if active === 'proxy'}
       <Proxy {prefill} />
     {:else if active === 'services'}

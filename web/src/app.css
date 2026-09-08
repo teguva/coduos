@@ -641,6 +641,17 @@ pre.logs {
 .sec-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .sec-head h3 { margin: 0; font-size: 14px; }
 .hint { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+button.linkish {
+  background: none;
+  border: 0;
+  padding: 0;
+  min-height: 0;
+  display: inline;
+  color: var(--accent-2);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
 .fwd-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

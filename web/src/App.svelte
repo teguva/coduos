@@ -80,6 +80,7 @@
     if (path === '/storage' || path === '/settings/storage') return { name: 'settings', pane: 'storage' };
     if (path === '/network' || path === '/settings/network') return { name: 'settings', pane: 'network' };
     if (path === '/vpn' || path === '/settings/vpn') return { name: 'settings', pane: 'vpn' };
+    if (path === '/ddns' || path === '/settings/ddns') return { name: 'settings', pane: 'ddns' };
     if (path === '/proxy' || path === '/settings/proxy') return { name: 'settings', pane: 'proxy' };
     if (path === '/services' || path === '/settings/services') return { name: 'settings', pane: 'services' };
     if (path === '/settings' || path === '/settings/general') return { name: 'settings', pane: 'general' };

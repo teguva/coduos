@@ -12,6 +12,7 @@ mod files;
 mod icons;
 mod proxy;
 mod settings;
+mod ddns;
 mod storage;
 mod system;
 mod units;
@@ -29,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .merge(storage::router())
         .merge(vpn::router())
         .merge(proxy::router())
+        .merge(ddns::router())
 }
 
 pub async fn current_user(state: &AppState, jar: &CookieJar) -> Result<UserRow, ApiError> {

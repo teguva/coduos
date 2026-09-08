@@ -19,6 +19,7 @@ export const appIcons = {
   storage: 'disk',
   tasks: 'cpu',
   vpn: 'folder-locked',
+  ddns: 'folder-cloud',
   proxy: 'server',
   network: 'laptop',
   battery: 'battery'

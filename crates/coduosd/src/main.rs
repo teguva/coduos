@@ -2,6 +2,7 @@ mod auth;
 mod battery;
 mod config;
 mod db;
+mod ddns;
 mod docker;
 mod error;
 mod github;
@@ -55,6 +56,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(cfg.icons_dir())?;
     vpn::ensure_dirs(&cfg);
     proxy::ensure_dirs(&cfg);
+    ddns::ensure_dirs(&cfg);
     seed_icons_readme(&cfg.icons_dir());
     storage::remount_persisted(&cfg);
     battery::apply_persisted(&cfg);
@@ -83,6 +85,7 @@ async fn main() -> Result<()> {
         summary_rx,
         http,
     };
+    ddns::spawn_updater(state.clone());
 
     let app = Router::new()
         .nest("/api", routes::router())
