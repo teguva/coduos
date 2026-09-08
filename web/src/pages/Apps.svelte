@@ -30,7 +30,9 @@
     <h2>Apps</h2>
     <div class="sub">Docker Compose applications</div>
   </div>
-  <button class="btn" onclick={() => go('/apps/new')}>Install app</button>
+  <button class="btn icon-only" onclick={() => go('/apps/new')} aria-label="Install app">
+    <Icon name="add" size={20} alt="" />
+  </button>
 </div>
 {#if error}<div class="err">{error}</div>{/if}
 {#key $iconRev}

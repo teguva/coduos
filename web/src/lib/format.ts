@@ -33,6 +33,16 @@ export function when(ts?: number | null): string {
   return new Date(ts * 1000).toLocaleString();
 }
 
+export function shortDate(ts?: number | null): string {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  return `${dd}/${mm} ${hh}:${min}`;
+}
+
 export function shortOs(os: string): string {
   let s = os.replace(/^Linux\s*\(/i, '').replace(/\)$/, '');
   s = s.replace(/\bGNU\/Linux\s+/i, '');
@@ -52,4 +62,21 @@ export function watts(n: number): string {
 
 export function joinMeta(parts: Array<string | null | undefined | false>): string {
   return parts.filter((p): p is string => Boolean(p)).join(' · ');
+}
+
+export function batteryLabel(b: {
+  status: string;
+  charging?: boolean;
+  ac_online?: boolean;
+  limit_pct?: number | null;
+}): string {
+  const s = (b.status || '').toLowerCase();
+  if (s === 'charging') return 'Charging';
+  if (s === 'discharging') return 'Discharging';
+  if (s === 'full') return 'Full';
+  if (s === 'not charging') {
+    if (b.limit_pct != null && b.limit_pct < 100) return `Holding at ${b.limit_pct}%`;
+    return b.ac_online ? 'Plugged in' : 'Not charging';
+  }
+  return b.status || 'Battery';
 }

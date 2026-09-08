@@ -1,4 +1,5 @@
 mod auth;
+mod battery;
 mod config;
 mod db;
 mod docker;
@@ -56,6 +57,7 @@ async fn main() -> Result<()> {
     proxy::ensure_dirs(&cfg);
     seed_icons_readme(&cfg.icons_dir());
     storage::remount_persisted(&cfg);
+    battery::apply_persisted(&cfg);
 
     if !config_path.exists() {
         if let Err(err) = cfg.save(&config_path) {

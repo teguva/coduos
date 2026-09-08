@@ -20,7 +20,8 @@ export const appIcons = {
   tasks: 'cpu',
   vpn: 'folder-locked',
   proxy: 'server',
-  network: 'laptop'
+  network: 'laptop',
+  battery: 'battery'
 } as const;
 
 const FOLDER_ALIAS: Record<string, string> = {
@@ -151,6 +152,7 @@ const BUNDLED = new Set([
   'apps',
   'archive',
   'audio',
+  'battery',
   'close',
   'cmake',
   'computer',

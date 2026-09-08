@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, toggleTheme, isLight } from '../lib/api';
-  import { bytes, bps, pct, uptime, shortOs, prettyGpu, watts, joinMeta } from '../lib/format';
+  import { bytes, bps, pct, uptime, shortOs, prettyGpu, watts, joinMeta, batteryLabel } from '../lib/format';
   import { appIcons, appIcon, iconRev } from '../lib/icons';
   import Icon from './Icon.svelte';
   import Sparkline from './Sparkline.svelte';
@@ -32,6 +32,16 @@
     power_w?: number | null;
   };
   type Proc = { pid: number; name: string; cpu_percent: number; mem_bytes: number };
+  type Battery = {
+    id: string;
+    name: string;
+    capacity_pct?: number | null;
+    status: string;
+    charging: boolean;
+    ac_online: boolean;
+    power_w?: number | null;
+    limit_pct?: number | null;
+  };
   type Summary = {
     hostname: string;
     os: string;
@@ -46,6 +56,7 @@
     networks: Net[];
     gpus: Gpu[];
     processes: Proc[];
+    batteries?: Battery[];
     version: string;
   };
   type App = {
@@ -62,6 +73,19 @@
   let now = $state(new Date());
   let menu = $state(false);
   let netHist = $state<{ rx: number; tx: number }[]>([]);
+  let query = $state('');
+  let searchEl = $state<HTMLInputElement | null>(null);
+
+  const systemTiles = [
+    { id: 'files', name: 'Files', icon: appIcons.files, to: '/files' },
+    { id: 'apps', name: 'Apps', icon: appIcons.apps, to: '/apps' },
+    { id: 'settings', name: 'Settings', icon: appIcons.settings, to: '/settings' },
+    { id: 'tasks', name: 'Tasks', icon: appIcons.tasks, to: '/tasks' }
+  ];
+
+  let q = $derived(query.trim().toLowerCase());
+  let shownSystem = $derived(systemTiles.filter((t) => !q || t.name.toLowerCase().includes(q)));
+  let shownApps = $derived(apps.filter((a) => !q || a.name.toLowerCase().includes(q)));
 
   let primaryNet = $derived(
     (summary?.networks ?? []).find((n) => !n.virtual_iface && n.operstate === 'up') ||
@@ -82,6 +106,11 @@
     )
   );
   let gpu = $derived(summary?.gpus?.[0]);
+  let battery = $derived(
+    (summary?.batteries ?? []).find((b) => b.status.toLowerCase() === 'discharging') ||
+      (summary?.batteries ?? []).find((b) => b.charging) ||
+      summary?.batteries?.[0]
+  );
 
   function appActive(to: string) {
     if (to === '/apps') {
@@ -121,9 +150,18 @@
       .then((a) => (apps = a))
       .catch(() => {});
     const c = setInterval(() => (now = new Date()), 30000);
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== '/' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      const t = ev.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      ev.preventDefault();
+      searchEl?.focus();
+    };
+    window.addEventListener('keydown', onKey);
     return () => {
       es.close();
       clearInterval(c);
+      window.removeEventListener('keydown', onKey);
     };
   });
 
@@ -201,8 +239,30 @@
             <div>{bytes(summary.mem_used)} / {bytes(summary.mem_total)}</div>
           </div>
         </button>
+        {#if battery && battery.capacity_pct != null}
+          <button
+            class="widget widget-bat hit"
+            class:low={battery.capacity_pct < 20 && !battery.charging && !battery.ac_online}
+            onclick={() => tap('/settings')}
+          >
+            <div class="gauge" style="--p:{battery.capacity_pct}"><span>{battery.capacity_pct}%</span></div>
+            <div>
+              <h3><Icon name={appIcons.battery} size={16} alt="" /> Battery</h3>
+              <div>{batteryLabel(battery)}</div>
+              <div class="meta clip">
+                {joinMeta([
+                  battery.charging && battery.power_w ? watts(battery.power_w) : null,
+                  battery.limit_pct != null && battery.limit_pct < 100 && battery.status.toLowerCase() !== 'not charging'
+                    ? `limit ${battery.limit_pct}%`
+                    : null,
+                  battery.name
+                ])}
+              </div>
+            </div>
+          </button>
+        {/if}
         {#if primaryNet}
-          <button class="widget widget-net hit" onclick={() => tap('/network')}>
+          <button class="widget widget-net hit" onclick={() => tap('/settings/network')}>
             <div>
               <h3><Icon name={appIcons.network} size={16} alt="" /> Network</h3>
               <div>↓ {bps(primaryNet.rx_bps)} ↑ {bps(primaryNet.tx_bps)}</div>
@@ -212,7 +272,7 @@
           </button>
         {/if}
         {#if worstDisk}
-          <button class="widget hit" onclick={() => tap('/storage')}>
+          <button class="widget hit" onclick={() => tap('/settings/storage')}>
             <div class="gauge" style="--p:{pct(worstDisk.used, worstDisk.total)}"><span>{pct(worstDisk.used, worstDisk.total)}%</span></div>
             <div>
               <h3><Icon name="disk" size={16} alt="" /> Storage</h3>
@@ -235,51 +295,34 @@
     </aside>
 
     <section class="desk-main">
+      <label class="desk-search">
+        <span class="meta">Search</span>
+        <input
+          bind:this={searchEl}
+          bind:value={query}
+          placeholder="Apps and tools"
+          aria-label="Search apps"
+        />
+      </label>
       {#key $iconRev}
-      <div class="desk-apps">
-        <button class="desk-app hit" class:active={appActive('/files')} onclick={() => go('/files')}>
-          <Icon name={appIcons.files} size={56} class="tile-img" alt="" />
-          <div class="label">Files</div>
-        </button>
-        <button class="desk-app hit" class:active={appActive('/apps')} onclick={() => go('/apps')}>
-          <Icon name={appIcons.apps} size={56} class="tile-img" alt="" />
-          <div class="label">Apps</div>
-        </button>
-        <button class="desk-app hit" class:active={appActive('/storage')} onclick={() => go('/storage')}>
-          <Icon name={appIcons.storage} size={56} class="tile-img" alt="" />
-          <div class="label">Storage</div>
-        </button>
-        <button class="desk-app hit" class:active={appActive('/tasks')} onclick={() => go('/tasks')}>
-          <Icon name={appIcons.tasks} size={56} class="tile-img" alt="" />
-          <div class="label">Tasks</div>
-        </button>
-        <button class="desk-app hit" class:active={appActive('/vpn')} onclick={() => go('/vpn')}>
-          <Icon name={appIcons.vpn} size={56} class="tile-img" alt="" />
-          <div class="label">VPN</div>
-        </button>
-        <button class="desk-app hit" class:active={appActive('/proxy')} onclick={() => go('/proxy')}>
-          <Icon name={appIcons.proxy} size={56} class="tile-img" alt="" />
-          <div class="label">Proxy</div>
-        </button>
-        <button class="desk-app hit" class:active={appActive('/services')} onclick={() => go('/services')}>
-          <Icon name={appIcons.services} size={56} class="tile-img" alt="" />
-          <div class="label">Services</div>
-        </button>
-        <button class="desk-app hit" class:active={appActive('/settings')} onclick={() => go('/settings')}>
-          <Icon name={appIcons.settings} size={56} class="tile-img" alt="" />
-          <div class="label">Settings</div>
-        </button>
-        {#each apps as app}
-          <button class="desk-app hit" class:active={appActive('/apps/' + app.id)} onclick={() => openApp(app)}>
-            <Icon name={appIcon(app)} size={56} class="tile-img" alt="" />
-            <div class="label">{app.name}</div>
-            <div class="state"><span class="dot" class:on={app.status.running}></span> {app.status.running ? 'Running' : 'Stopped'}</div>
+      <div class="desk-apps launch">
+        {#each shownSystem as t}
+          <button class="desk-app hit" class:active={appActive(t.to)} onclick={() => go(t.to)}>
+            <Icon name={t.icon} size={64} class="tile-img" alt="" />
+            <div class="label">{t.name}</div>
           </button>
         {/each}
-        <button class="desk-app hit" class:active={path === '/apps/new'} onclick={() => go('/apps/new')}>
-          <Icon name={appIcons.install} size={56} class="tile-img" alt="" />
-          <div class="label">Install</div>
-        </button>
+        {#each shownApps as app}
+          <button class="desk-app hit" class:active={appActive('/apps/' + app.id)} onclick={() => openApp(app)}>
+            <Icon name={appIcon(app)} size={64} class="tile-img" alt="" />
+            <div class="label">{app.name}</div>
+          </button>
+        {/each}
+        {#if !q && shownSystem.length + shownApps.length === 0}
+          <p class="hint">Nothing matches.</p>
+        {:else if q && shownSystem.length + shownApps.length === 0}
+          <p class="hint">No apps named “{query}”.</p>
+        {/if}
       </div>
       {/key}
     </section>
@@ -292,8 +335,8 @@
     <button class="hit" class:active={path.startsWith('/files')} onclick={() => go('/files')}>
       <Icon name={appIcons.files} size={22} alt="" /> Files
     </button>
-    <button class="hit" class:active={path.startsWith('/storage')} onclick={() => go('/storage')}>
-      <Icon name={appIcons.storage} size={22} alt="" /> Storage
+    <button class="hit" class:active={path.startsWith('/apps')} onclick={() => go('/apps')}>
+      <Icon name={appIcons.apps} size={22} alt="" /> Apps
     </button>
     <button class="hit" class:active={path.startsWith('/settings')} onclick={() => go('/settings')}>
       <Icon name={appIcons.settings} size={22} alt="" /> Settings

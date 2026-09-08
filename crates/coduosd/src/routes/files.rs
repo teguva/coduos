@@ -56,6 +56,14 @@ struct ListOut {
     path: String,
     roots: Vec<RootOut>,
     entries: Vec<Entry>,
+    favorites: Vec<crate::config::FileFavorite>,
+    space: Option<SpaceOut>,
+}
+
+#[derive(Serialize)]
+struct SpaceOut {
+    used: u64,
+    total: u64,
 }
 
 async fn resolve(state: &AppState, root_id: &str, rel: &str) -> Result<PathBuf, ApiError> {
@@ -82,6 +90,7 @@ async fn list(
             path: r.path.display().to_string(),
         })
         .collect();
+    let favorites = cfg.file_favorites.clone();
     let root_id = match q.root.clone().filter(|s| !s.is_empty()) {
         Some(id) => id,
         None => {
@@ -90,6 +99,8 @@ async fn list(
                 path: String::new(),
                 roots,
                 entries: vec![],
+                favorites,
+                space: None,
             }));
         }
     };
@@ -128,12 +139,36 @@ async fn list(
         });
     }
     entries.sort_by(|a, b| b.dir.cmp(&a.dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    let space = disk_space(&dir);
     Ok(Json(ListOut {
         root: root_id,
         path: q.path,
         roots,
         entries,
+        favorites,
+        space,
     }))
+}
+
+fn disk_space(path: &std::path::Path) -> Option<SpaceOut> {
+    let cstr = std::ffi::CString::new(path.to_str()?).ok()?;
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(cstr.as_ptr(), &mut s) } != 0 {
+        return None;
+    }
+    let fr = s.f_frsize as u64;
+    if fr == 0 {
+        return None;
+    }
+    let total = s.f_blocks.saturating_mul(fr);
+    let avail = s.f_bavail.saturating_mul(fr);
+    if total == 0 {
+        return None;
+    }
+    Some(SpaceOut {
+        used: total.saturating_sub(avail),
+        total,
+    })
 }
 
 #[derive(Deserialize)]

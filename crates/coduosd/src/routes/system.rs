@@ -8,6 +8,7 @@ use std::convert::Infallible;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
 
+use crate::battery::{self, BatteryPack, ChargeLimitIn};
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::stats::{self, DockerStat, ProcInfo, SystemSummary};
@@ -20,6 +21,7 @@ pub fn router() -> Router<AppState> {
         .route("/system/summary/stream", get(stream))
         .route("/system/tasks", get(tasks))
         .route("/system/process/{pid}/signal", post(signal))
+        .route("/system/battery", get(battery).post(set_battery))
 }
 
 #[derive(Serialize)]
@@ -76,4 +78,27 @@ async fn stream(
         Err(_) => Ok(Event::default().data("{}")),
     });
     Ok(Sse::new(s).keep_alive(KeepAlive::default()))
+}
+
+async fn battery(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<BatteryPack>, ApiError> {
+    current_user(&state, &jar).await?;
+    Ok(Json(battery::snapshot()))
+}
+
+async fn set_battery(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<ChargeLimitIn>,
+) -> Result<Json<BatteryPack>, ApiError> {
+    current_user(&state, &jar).await?;
+    let mut cfg = state.config.write().await;
+    Ok(Json(battery::apply_and_save(
+        &mut cfg,
+        &state.config_path,
+        body.limit_pct,
+        body.start_pct,
+    )?))
 }

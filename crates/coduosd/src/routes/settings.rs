@@ -5,7 +5,7 @@ use axum_extra::extract::CookieJar;
 use serde::{Deserialize, Serialize};
 
 use crate::auth;
-use crate::config::{valid_id, FileRoot, UnitSpec};
+use crate::config::{valid_id, FileFavorite, FileRoot, UnitSpec};
 use crate::error::ApiError;
 use crate::github;
 use crate::state::AppState;
@@ -27,6 +27,7 @@ struct SettingsOut {
     github_owner: String,
     github_repo: String,
     file_roots: Vec<FileRoot>,
+    file_favorites: Vec<FileFavorite>,
     units: Vec<UnitSpec>,
     version: &'static str,
     hostname: String,
@@ -50,6 +51,7 @@ fn settings_out(cfg: &crate::config::Config) -> SettingsOut {
         github_owner: cfg.github_owner.clone(),
         github_repo: cfg.github_repo.clone(),
         file_roots: cfg.file_roots.clone(),
+        file_favorites: cfg.file_favorites.clone(),
         units: cfg.units.clone(),
         version: env!("CARGO_PKG_VERSION"),
         hostname: hostname::get()
@@ -63,6 +65,7 @@ fn settings_out(cfg: &crate::config::Config) -> SettingsOut {
 #[derive(Deserialize)]
 struct SettingsIn {
     file_roots: Option<Vec<FileRoot>>,
+    file_favorites: Option<Vec<FileFavorite>>,
     units: Option<Vec<UnitSpec>>,
     github_owner: Option<String>,
     github_repo: Option<String>,
@@ -86,6 +89,17 @@ async fn put_settings(
             }
         }
         next.file_roots = roots;
+    }
+    if let Some(favs) = body.file_favorites {
+        for f in &favs {
+            if !valid_id(&f.root) {
+                return Err(ApiError::BadRequest(format!("invalid favorite root {}", f.root)));
+            }
+            if f.path.contains('\0') || f.path.starts_with('/') {
+                return Err(ApiError::BadRequest("favorite path must be relative".into()));
+            }
+        }
+        next.file_favorites = favs;
     }
     if let Some(units) = body.units {
         for u in &units {

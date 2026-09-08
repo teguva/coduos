@@ -21,6 +21,33 @@ pub struct Config {
     pub units: Vec<UnitSpec>,
     #[serde(default)]
     pub storage_mounts: Vec<StorageMount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_favorites: Vec<FileFavorite>,
+    #[serde(default, skip_serializing_if = "BatteryConfig::is_empty")]
+    pub battery: BatteryConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BatteryConfig {
+    /// Stop charging at this percent. 100 = full. Applied at boot when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_pct: Option<u8>,
+    /// Resume charging below this percent (ThinkPad-style hysteresis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_pct: Option<u8>,
+}
+
+impl BatteryConfig {
+    fn is_empty(&self) -> bool {
+        self.limit_pct.is_none() && self.start_pct.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileFavorite {
+    pub root: String,
+    pub path: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +139,8 @@ impl Config {
             file_roots: default_file_roots(),
             units: default_units(),
             storage_mounts: Vec::new(),
+            file_favorites: Vec::new(),
+            battery: BatteryConfig::default(),
         };
         if !running_as_root() {
             cfg.bind = "127.0.0.1:13209".into();

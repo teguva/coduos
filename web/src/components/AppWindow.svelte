@@ -7,12 +7,14 @@
     icon,
     onClose,
     size = 'narrow',
+    flush = false,
     children
   } = $props<{
     title: string;
     icon?: string;
     onClose: () => void;
-    size?: 'narrow' | 'wide' | 'sheet';
+    size?: 'narrow' | 'wide' | 'sheet' | 'xl';
+    flush?: boolean;
     children: any;
   }>();
 
@@ -43,7 +45,7 @@
         <Icon name="close" size={18} alt="" />
       </button>
     </header>
-    <div class="os-body">
+    <div class="os-body" class:flush>
       {@render children()}
     </div>
   </div>

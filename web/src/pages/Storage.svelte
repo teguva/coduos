@@ -182,7 +182,7 @@
 {#if error}<div class="err">{error}</div>{/if}
 
 <h3 class="group-title">This device</h3>
-{#if internal.length === 0}
+{#if inv && internal.length === 0}
   <p class="hint">No internal disks reported.</p>
 {/if}
 {#each internal as d}
@@ -231,7 +231,7 @@
 {/each}
 
 <h3 class="group-title">External</h3>
-{#if external.length === 0}
+{#if inv && external.length === 0}
   <p class="hint">Plug in a drive.</p>
 {/if}
 {#each external as d}

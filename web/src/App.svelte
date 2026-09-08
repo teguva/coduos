@@ -9,13 +9,8 @@
   import Apps from './pages/Apps.svelte';
   import AppEditor from './pages/AppEditor.svelte';
   import Files from './pages/Files.svelte';
-  import Services from './pages/Services.svelte';
   import Settings from './pages/Settings.svelte';
-  import Storage from './pages/Storage.svelte';
   import Tasks from './pages/Tasks.svelte';
-  import Vpn from './pages/Vpn.svelte';
-  import Proxy from './pages/Proxy.svelte';
-  import Network from './pages/Network.svelte';
 
   let path = $state(location.pathname);
   let search = $state(location.search);
@@ -81,13 +76,16 @@
     if (path === '/apps/new') return { name: 'new' };
     if (path === '/apps') return { name: 'apps' };
     if (path === '/files') return { name: 'files' };
-    if (path === '/services') return { name: 'services' };
-    if (path === '/settings') return { name: 'settings' };
-    if (path === '/storage') return { name: 'storage' };
     if (path === '/tasks') return { name: 'tasks' };
-    if (path === '/vpn') return { name: 'vpn' };
-    if (path === '/proxy') return { name: 'proxy' };
-    if (path === '/network') return { name: 'network' };
+    if (path === '/storage' || path === '/settings/storage') return { name: 'settings', pane: 'storage' };
+    if (path === '/network' || path === '/settings/network') return { name: 'settings', pane: 'network' };
+    if (path === '/vpn' || path === '/settings/vpn') return { name: 'settings', pane: 'vpn' };
+    if (path === '/proxy' || path === '/settings/proxy') return { name: 'settings', pane: 'proxy' };
+    if (path === '/services' || path === '/settings/services') return { name: 'settings', pane: 'services' };
+    if (path === '/settings' || path === '/settings/general') return { name: 'settings', pane: 'general' };
+    if (path.startsWith('/settings/')) {
+      return { name: 'settings', pane: decodeURIComponent(path.slice('/settings/'.length)) || 'general' };
+    }
     return { name: 'home' };
   });
 
@@ -133,33 +131,13 @@
     <AppWindow title="App settings" icon={appIcons.docker} size="wide" onClose={() => go('/')}>
       <AppEditor {go} id={page.id} />
     </AppWindow>
-  {:else if page.name === 'services'}
-    <AppWindow title="Services" icon={appIcons.services} size="wide" onClose={() => go('/')}>
-      <Services />
-    </AppWindow>
   {:else if page.name === 'settings'}
-    <AppWindow title="Settings" icon={appIcons.settings} size="wide" onClose={() => go('/')}>
-      <Settings />
-    </AppWindow>
-  {:else if page.name === 'storage'}
-    <AppWindow title="Storage" icon={appIcons.storage} size="wide" onClose={() => go('/')}>
-      <Storage {go} />
+    <AppWindow title="Settings" icon={appIcons.settings} size="xl" flush onClose={() => go('/')}>
+      <Settings pane={page.pane} {go} prefill={proxyPrefill} />
     </AppWindow>
   {:else if page.name === 'tasks'}
     <AppWindow title="Task Manager" icon={appIcons.tasks} size="wide" onClose={() => go('/')}>
       <Tasks />
-    </AppWindow>
-  {:else if page.name === 'vpn'}
-    <AppWindow title="VPN" icon={appIcons.vpn} size="wide" onClose={() => go('/')}>
-      <Vpn />
-    </AppWindow>
-  {:else if page.name === 'proxy'}
-    <AppWindow title="Proxy" icon={appIcons.proxy} size="wide" onClose={() => go('/')}>
-      <Proxy prefill={proxyPrefill} />
-    </AppWindow>
-  {:else if page.name === 'network'}
-    <AppWindow title="Network" icon={appIcons.network} size="wide" onClose={() => go('/')}>
-      <Network />
     </AppWindow>
   {/if}
 {/if}

@@ -29,6 +29,7 @@ pub struct SystemSummary {
     pub gpus: Vec<GpuInfo>,
     pub processes: Vec<ProcInfo>,
     pub docker: DockerInfo,
+    pub batteries: Vec<crate::battery::BatteryCell>,
     pub version: String,
     pub privileged: bool,
 }
@@ -115,6 +116,7 @@ impl Default for SystemSummary {
                 version: None,
                 error: None,
             },
+            batteries: vec![],
             version: env!("CARGO_PKG_VERSION").into(),
             privileged: crate::config::running_as_root(),
         }
@@ -289,6 +291,7 @@ impl Collector {
             gpus,
             processes,
             docker: docker_info(),
+            batteries: crate::battery::summary_batteries(),
             version: env!("CARGO_PKG_VERSION").into(),
             privileged: crate::config::running_as_root(),
         }
