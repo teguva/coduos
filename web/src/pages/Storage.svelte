@@ -41,6 +41,9 @@
   let error = $state('');
   let busy = $state('');
   let confirm = $state<{ title: string; body: string; force?: boolean; device: string } | null>(null);
+  let formatDlg = $state<{ device: string; title: string } | null>(null);
+  let fmtFs = $state('ext4');
+  let fmtLabel = $state('');
 
   async function load() {
     inv = await api<Inventory>('/api/storage');
@@ -103,6 +106,10 @@
     return Boolean(p.mountpoint) && kind !== 'swap' && kind !== 'efi' && (p.total ?? p.size) > 0;
   }
 
+  function canManage(d: Disk) {
+    return !d.system;
+  }
+
   function displayMount(p: Partition, d: Disk) {
     const kind = role(p, d);
     if (kind === 'swap') return 'Swap';
@@ -160,6 +167,31 @@
     }
   }
 
+  async function doFormat() {
+    if (!formatDlg) return;
+    const device = formatDlg.device;
+    error = '';
+    busy = device;
+    try {
+      await api('/api/storage/format', {
+        method: 'POST',
+        body: JSON.stringify({ device, fstype: fmtFs, label: fmtLabel })
+      });
+      formatDlg = null;
+      await load();
+    } catch (e: any) {
+      error = e.message;
+    } finally {
+      busy = '';
+    }
+  }
+
+  function openFormat(device: string, title: string, label: string) {
+    fmtFs = 'ext4';
+    fmtLabel = label || 'data';
+    formatDlg = { device, title };
+  }
+
   function fallbackPart(d: Disk): Partition {
     return {
       name: d.name,
@@ -177,7 +209,7 @@
 </script>
 
 {#if !inv?.privileged}
-  <div class="banner">Mount and eject need the installed daemon running as root. Inventory is still shown.</div>
+  <div class="banner">Mount, format, and eject need the installed daemon running as root. Inventory is still shown.</div>
 {/if}
 {#if error}<div class="err">{error}</div>{/if}
 
@@ -193,11 +225,17 @@
         <strong>{title(d)}</strong>
         <div class="meta">{bytes(d.size)} · {d.path}{#if d.transport} · {d.transport}{/if}</div>
       </div>
+      {#if d.system}
+        <span class="chip muted">System disk</span>
+      {/if}
       {#if d.health}
         <span class="chip" class:ok={d.health === 'passed'} class:warn={d.health !== 'passed'}>SMART {d.health}</span>
       {/if}
     </div>
-    {#each d.partitions as p}
+    {#if d.system}
+      <p class="hint">Left alone because it holds OS partitions.</p>
+    {/if}
+    {#each d.partitions.length ? d.partitions : canManage(d) ? [fallbackPart(d)] : [] as p}
       {@const kind = role(p, d)}
       {@const used = p.used ?? 0}
       {@const total = p.total ?? p.size}
@@ -216,7 +254,21 @@
             <div class="meta">{displayMount(p, d)}</div>
           {/if}
         </div>
-        {#if action}
+        {#if canManage(d)}
+          <div class="part-actions">
+            {#if p.mountpoint}
+              <button class="btn compact secondary" disabled={!inv?.privileged || busy === p.path} onclick={() => eject(p.path)}>Unmount</button>
+              {#if action === 'open'}
+                <button class="btn compact secondary" onclick={() => go('/files')}>Open in Files</button>
+              {:else if action === 'add'}
+                <button class="btn compact secondary" onclick={() => useInFiles(p.path)}>Use in Files</button>
+              {/if}
+            {:else if kind !== 'swap'}
+              <button class="btn compact" disabled={!inv?.privileged || busy === p.path} onclick={() => mount(p.path)}>Mount</button>
+            {/if}
+            <button class="btn compact danger" disabled={!inv?.privileged || busy === p.path || busy === d.path} onclick={() => openFormat(p.path === d.path ? d.path : p.path, p.label || p.name, p.label)}>Format</button>
+          </div>
+        {:else if action}
           <div class="part-actions">
             {#if action === 'open'}
               <button class="btn compact secondary" onclick={() => go('/files')}>Open in Files</button>
@@ -227,6 +279,11 @@
         {/if}
       </div>
     {/each}
+    {#if canManage(d) && d.partitions.length > 0}
+      <div class="part-actions" style="margin-top:8px">
+        <button class="btn compact danger" disabled={!inv?.privileged || busy === d.path} onclick={() => openFormat(d.path, title(d), title(d))}>Format whole disk</button>
+      </div>
+    {/if}
   </div>
 {/each}
 
@@ -264,15 +321,24 @@
           {/if}
         </div>
         <div class="part-actions">
-          {#if p.mountpoint}
-            <button class="btn compact secondary" disabled={!inv?.privileged || busy === p.path} onclick={() => eject(p.path)}>Eject</button>
+          {#if canManage(d)}
+            {#if p.mountpoint}
+              <button class="btn compact secondary" disabled={!inv?.privileged || busy === p.path} onclick={() => eject(p.path)}>Eject</button>
+              {#if action === 'open'}
+                <button class="btn compact" onclick={() => go('/files')}>Open in Files</button>
+              {:else if action === 'add'}
+                <button class="btn compact" onclick={() => useInFiles(p.path)}>Use in Files</button>
+              {/if}
+            {:else if kind !== 'swap'}
+              <button class="btn compact" disabled={!inv?.privileged || busy === p.path} onclick={() => mount(p.path)}>Mount</button>
+            {/if}
+            <button class="btn compact danger" disabled={!inv?.privileged || busy === p.path || busy === d.path} onclick={() => openFormat(p.path === d.path ? d.path : p.path, p.label || p.name, p.label)}>Format</button>
+          {:else if p.mountpoint}
             {#if action === 'open'}
               <button class="btn compact" onclick={() => go('/files')}>Open in Files</button>
             {:else if action === 'add'}
               <button class="btn compact" onclick={() => useInFiles(p.path)}>Use in Files</button>
             {/if}
-          {:else if kind !== 'swap' && kind !== 'efi'}
-            <button class="btn compact" disabled={!inv?.privileged || busy === p.path} onclick={() => mount(p.path)}>Mount</button>
           {/if}
         </div>
       </div>
@@ -293,4 +359,28 @@
       await eject(device, true);
     }}
   />
+{/if}
+
+{#if formatDlg}
+  <div class="confirm-bg" role="presentation" onclick={(e) => { if (e.currentTarget === e.target) formatDlg = null; }}>
+    <div class="confirm-card" role="dialog" aria-label="Format drive">
+      <h3>Format {formatDlg.title}?</h3>
+      <p class="danger-text">This erases everything on {formatDlg.device}. The volume is then mounted for Files.</p>
+      <label class="field"><span>Filesystem</span>
+        <select bind:value={fmtFs}>
+          <option value="ext4">ext4 (Linux)</option>
+          <option value="xfs">XFS</option>
+          <option value="btrfs">Btrfs</option>
+          <option value="exfat">exFAT (USB / Windows)</option>
+        </select>
+      </label>
+      <label class="field"><span>Label</span>
+        <input bind:value={fmtLabel} maxlength="16" placeholder="data" />
+      </label>
+      <div class="row">
+        <button class="btn secondary" onclick={() => (formatDlg = null)}>Cancel</button>
+        <button class="btn danger" disabled={!!busy} onclick={doFormat}>Format</button>
+      </div>
+    </div>
+  </div>
 {/if}

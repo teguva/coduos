@@ -3,7 +3,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
@@ -12,6 +12,7 @@ use crate::battery::{self, BatteryPack, ChargeLimitIn};
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::stats::{self, DockerStat, ProcInfo, SystemSummary};
+use crate::util;
 
 use super::current_user;
 
@@ -22,6 +23,7 @@ pub fn router() -> Router<AppState> {
         .route("/system/tasks", get(tasks))
         .route("/system/process/{pid}/signal", post(signal))
         .route("/system/battery", get(battery).post(set_battery))
+        .route("/system/power", post(power))
 }
 
 #[derive(Serialize)]
@@ -101,4 +103,35 @@ async fn set_battery(
         body.limit_pct,
         body.start_pct,
     )?))
+}
+
+#[derive(Deserialize)]
+struct PowerIn {
+    action: String,
+}
+
+async fn power(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<PowerIn>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    current_user(&state, &jar).await?;
+    util::require_privileged()?;
+    let unit = match body.action.as_str() {
+        "reboot" => "reboot",
+        "shutdown" => "poweroff",
+        _ => {
+            return Err(ApiError::BadRequest(
+                "action must be reboot or shutdown".into(),
+            ))
+        }
+    };
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let _ = tokio::process::Command::new("systemctl")
+            .args([unit, "--no-block"])
+            .status()
+            .await;
+    });
+    Ok(Json(serde_json::json!({"ok": true, "action": body.action})))
 }

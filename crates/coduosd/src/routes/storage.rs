@@ -16,6 +16,7 @@ pub fn router() -> Router<AppState> {
         .route("/storage/mount", post(mount))
         .route("/storage/unmount", post(unmount))
         .route("/storage/files", post(add_files))
+        .route("/storage/format", post(format_dev))
 }
 
 async fn list(
@@ -83,5 +84,28 @@ async fn add_files(
         &mut cfg,
         &state.config_path,
         &body.device,
+    )?))
+}
+
+#[derive(Deserialize)]
+struct FormatIn {
+    device: String,
+    fstype: Option<String>,
+    label: Option<String>,
+}
+
+async fn format_dev(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<FormatIn>,
+) -> Result<Json<Partition>, ApiError> {
+    current_user(&state, &jar).await?;
+    let mut cfg = state.config.write().await;
+    Ok(Json(storage::format_and_mount(
+        &mut cfg,
+        &state.config_path,
+        &body.device,
+        body.fstype.as_deref().unwrap_or("ext4"),
+        body.label.as_deref().unwrap_or(""),
     )?))
 }

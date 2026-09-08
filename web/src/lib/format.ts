@@ -69,13 +69,19 @@ export function batteryLabel(b: {
   charging?: boolean;
   ac_online?: boolean;
   limit_pct?: number | null;
+  start_pct?: number | null;
 }): string {
   const s = (b.status || '').toLowerCase();
   if (s === 'charging') return 'Charging';
   if (s === 'discharging') return 'Discharging';
   if (s === 'full') return 'Full';
   if (s === 'not charging') {
-    if (b.limit_pct != null && b.limit_pct < 100) return `Holding at ${b.limit_pct}%`;
+    if (b.limit_pct != null && b.limit_pct < 100) {
+      if (b.start_pct != null && b.start_pct < b.limit_pct) {
+        return `Holding ${b.start_pct}–${b.limit_pct}%`;
+      }
+      return `Holding at ${b.limit_pct}%`;
+    }
     return b.ac_online ? 'Plugged in' : 'Not charging';
   }
   return b.status || 'Battery';

@@ -32,6 +32,7 @@ pub struct BatteryCell {
     pub health_pct: Option<u8>,
     pub cycle_count: Option<u32>,
     pub limit_pct: Option<u8>,
+    pub start_pct: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,7 +77,7 @@ pub fn snapshot() -> BatteryPack {
     let batteries = hw
         .bats
         .iter()
-        .filter_map(|b| read_cell(b, hw.ac_online, limit.limit_pct))
+        .filter_map(|b| read_cell(b, hw.ac_online, limit.limit_pct, limit.start_pct))
         .collect::<Vec<_>>();
     BatteryPack {
         present: !batteries.is_empty(),
@@ -258,7 +259,7 @@ fn read_limit(hw: &Hardware) -> ChargeLimit {
             vec![60, 80, 90, 100],
             50,
             Some(
-                "Charging stops at this percent so a plugged-in laptop does not sit at 100%."
+                "Charging starts below the lower threshold and stops at the upper one, so a plugged-in laptop does not sit at 100%."
                     .into(),
             ),
         ),
@@ -289,7 +290,12 @@ fn read_limit(hw: &Hardware) -> ChargeLimit {
     }
 }
 
-fn read_cell(bat: &BatDev, ac_online: bool, limit_pct: Option<u8>) -> Option<BatteryCell> {
+fn read_cell(
+    bat: &BatDev,
+    ac_online: bool,
+    limit_pct: Option<u8>,
+    start_pct: Option<u8>,
+) -> Option<BatteryCell> {
     let present = read_trim(&bat.path.join("present"));
     if present == "0" {
         return None;
@@ -326,6 +332,7 @@ fn read_cell(bat: &BatDev, ac_online: bool, limit_pct: Option<u8>) -> Option<Bat
         health_pct: health_pct(&bat.path),
         cycle_count: read_u32(&bat.path.join("cycle_count")).filter(|n| *n > 0),
         limit_pct,
+        start_pct,
     })
 }
 

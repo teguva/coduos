@@ -641,6 +641,26 @@ pre.logs {
 .sec-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .sec-head h3 { margin: 0; font-size: 14px; }
 .hint { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+.fwd-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  background: var(--bg-elev);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.fwd-grid div { display: flex; flex-direction: column; gap: 2px; }
+.fwd-grid .meta { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.tips {
+  margin: 0 0 18px;
+  padding-left: 1.2em;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.tips li { margin-bottom: 6px; }
 .kv-head, .kv-row {
   display: grid;
   grid-template-columns: 1fr 1fr 140px 36px;
@@ -665,8 +685,55 @@ pre.logs {
 .mem input[type='range'] { flex: 1; }
 .btn.active { box-shadow: 0 0 0 1px var(--accent); }
 
+.stack-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 4px 0 18px;
+  padding: 6px;
+  background: color-mix(in srgb, var(--bg-solid) 70%, transparent);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.stack-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  padding: 2px 4px 2px 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.stack-tab-name {
+  background: none;
+  border: 0;
+  padding: 6px 8px;
+  color: inherit;
+}
+.stack-tab.add { padding: 8px 12px; color: var(--accent-2); }
+.stack-tab:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text); }
+.stack-tab.active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.stack-tab-x {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--muted);
+}
+.stack-tab-x:hover { background: color-mix(in srgb, var(--danger) 22%, transparent); color: var(--danger); }
+
 @media (max-width: 720px) {
-  .webui, .kv-head, .kv-row, .kv-head.two, .kv-row.two { grid-template-columns: 1fr; }
+  .webui, .kv-head, .kv-row, .kv-head.two, .kv-row.two, .fwd-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 1024px) and (min-width: 641px) {

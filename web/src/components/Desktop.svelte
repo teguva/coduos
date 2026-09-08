@@ -5,6 +5,7 @@
   import { appIcons, appIcon, iconRev } from '../lib/icons';
   import Icon from './Icon.svelte';
   import Sparkline from './Sparkline.svelte';
+  import Confirm from './Confirm.svelte';
 
   let { username, go, onLogout, path } = $props<{
     username: string;
@@ -41,6 +42,7 @@
     ac_online: boolean;
     power_w?: number | null;
     limit_pct?: number | null;
+    start_pct?: number | null;
   };
   type Summary = {
     hostname: string;
@@ -58,6 +60,7 @@
     processes: Proc[];
     batteries?: Battery[];
     version: string;
+    privileged?: boolean;
   };
   type App = {
     id: string;
@@ -75,6 +78,8 @@
   let netHist = $state<{ rx: number; tx: number }[]>([]);
   let query = $state('');
   let searchEl = $state<HTMLInputElement | null>(null);
+  let powerConfirm = $state<'reboot' | 'shutdown' | null>(null);
+  let powerBusy = $state('');
 
   const systemTiles = [
     { id: 'files', name: 'Files', icon: appIcons.files, to: '/files' },
@@ -176,6 +181,17 @@
   function tap(to: string) {
     go(to);
   }
+
+  async function applyPower(action: 'reboot' | 'shutdown') {
+    powerBusy = action;
+    powerConfirm = null;
+    menu = false;
+    try {
+      await api('/api/system/power', { method: 'POST', body: JSON.stringify({ action }) });
+    } catch {
+      powerBusy = '';
+    }
+  }
 </script>
 
 <div class="desktop" class:has-bottom={true}>
@@ -193,6 +209,14 @@
   {#if menu}
     <div class="avatar-sheet">
       <button class="hit" onclick={() => { menu = false; go('/settings'); }}>Settings</button>
+      {#if summary?.privileged}
+        <button class="hit" disabled={!!powerBusy} onclick={() => { menu = false; powerConfirm = 'reboot'; }}>
+          {powerBusy === 'reboot' ? 'Rebooting…' : 'Reboot'}
+        </button>
+        <button class="hit" disabled={!!powerBusy} onclick={() => { menu = false; powerConfirm = 'shutdown'; }}>
+          {powerBusy === 'shutdown' ? 'Shutting down…' : 'Shut down'}
+        </button>
+      {/if}
       <button class="hit" onclick={() => { menu = false; onLogout(); }}>Sign out</button>
     </div>
   {/if}
@@ -253,7 +277,9 @@
                 {joinMeta([
                   battery.charging && battery.power_w ? watts(battery.power_w) : null,
                   battery.limit_pct != null && battery.limit_pct < 100 && battery.status.toLowerCase() !== 'not charging'
-                    ? `limit ${battery.limit_pct}%`
+                    ? battery.start_pct != null && battery.start_pct < battery.limit_pct
+                      ? `${battery.start_pct}–${battery.limit_pct}%`
+                      : `limit ${battery.limit_pct}%`
                     : null,
                   battery.name
                 ])}
@@ -343,3 +369,23 @@
     </button>
   </nav>
 </div>
+
+{#if powerConfirm === 'reboot'}
+  <Confirm
+    title="Reboot this computer?"
+    body="CoduOS and every running app will stop. The machine starts again on its own."
+    confirmLabel="Reboot"
+    onCancel={() => (powerConfirm = null)}
+    onConfirm={() => applyPower('reboot')}
+  />
+{/if}
+{#if powerConfirm === 'shutdown'}
+  <Confirm
+    title="Shut down this computer?"
+    body="The machine will power off. You will need to turn it on again at the device."
+    confirmLabel="Shut down"
+    danger
+    onCancel={() => (powerConfirm = null)}
+    onConfirm={() => applyPower('shutdown')}
+  />
+{/if}

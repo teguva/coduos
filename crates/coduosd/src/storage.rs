@@ -169,7 +169,11 @@ fn is_system_mount(mount: &str, data_dir: &Path) -> bool {
     let data = data_dir.display().to_string();
     mount == "/"
         || mount == "/usr"
+        || mount == "/etc"
+        || mount == "/home"
         || mount.starts_with("/usr/")
+        || mount.starts_with("/etc/")
+        || mount.starts_with("/home/")
         || mount.starts_with("/boot")
         || mount.starts_with("/var")
         || mount.starts_with("/opt")
@@ -177,15 +181,53 @@ fn is_system_mount(mount: &str, data_dir: &Path) -> bool {
         || mount.starts_with("/run")
         || mount.starts_with("/sys")
         || mount.starts_with("/proc")
+        || mount.starts_with("/nix")
         || data == mount
         || Path::new(&data).starts_with(mount)
+}
+
+fn tree_has_system(dev: &LsblkDev, data_dir: &Path) -> bool {
+    let mounts = mounts_of(dev);
+    let fstype = opt_str(&dev.fstype);
+    let mount = preferred_mount(&mounts);
+    if mounts.iter().any(|m| is_system_mount(m, data_dir)) || is_swap(&fstype, &mount) {
+        return true;
+    }
+    if let Some(children) = &dev.children {
+        return children.iter().any(|ch| tree_has_system(ch, data_dir));
+    }
+    false
+}
+
+fn valid_dev(device: &str) -> Result<&str, ApiError> {
+    if !device.starts_with("/dev/")
+        || device.contains("..")
+        || device.contains('\0')
+        || !device
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+    {
+        return Err(ApiError::BadRequest("invalid device".into()));
+    }
+    Ok(device)
+}
+
+fn partition_node(disk: &str) -> String {
+    let base = disk.rsplit('/').next().unwrap_or(disk);
+    if base.chars().last().is_some_and(|c| c.is_ascii_digit()) {
+        format!("{disk}p1")
+    } else {
+        format!("{disk}1")
+    }
 }
 
 fn to_partition(dev: &LsblkDev, removable: bool, data_dir: &Path, roots: &[FileRoot]) -> Partition {
     let mounts = mounts_of(dev);
     let mount = preferred_mount(&mounts);
     let fstype = opt_str(&dev.fstype);
-    let system = mounts.iter().any(|m| is_system_mount(m, data_dir)) || is_swap(&fstype, &mount);
+    let system = mounts.iter().any(|m| is_system_mount(m, data_dir))
+        || is_swap(&fstype, &mount)
+        || tree_has_system(dev, data_dir);
     let (used, total) = if mount.is_empty() || is_swap(&fstype, &mount) {
         (None, None)
     } else {
@@ -287,6 +329,7 @@ pub fn inventory(cfg: &Config) -> Result<Inventory, ApiError> {
             continue;
         }
         let system = parts.iter().any(|p| p.system)
+            || tree_has_system(&dev, &cfg.data_dir)
             || is_system_mount(&opt_str(&dev.mountpoint), &cfg.data_dir);
         let path = dev_path(&dev);
         let health = smart_health(&path);
@@ -326,16 +369,19 @@ fn find_part<'a>(inv: &'a Inventory, device: &str) -> Option<(&'a Disk, &'a Part
 }
 
 fn refuse_system(part: &Partition) -> Result<(), ApiError> {
-    if part.system {
-        return Err(ApiError::Forbidden);
+    if part.system || is_system_mount(&part.mountpoint, Path::new("/")) {
+        return Err(ApiError::BadRequest(
+            "this volume has system partitions; CoduOS will not change it".into(),
+        ));
     }
-    if part.mountpoint == "/" || part.mountpoint == "/boot" {
-        return Err(ApiError::Forbidden);
-    }
-    if part.path.contains("/dm-") || part.path.contains("mapper") {
-        if part.system {
-            return Err(ApiError::Forbidden);
-        }
+    Ok(())
+}
+
+fn refuse_disk(disk: &Disk) -> Result<(), ApiError> {
+    if disk.system {
+        return Err(ApiError::BadRequest(
+            "this drive has system partitions; CoduOS will not format or remount it".into(),
+        ));
     }
     Ok(())
 }
@@ -355,10 +401,8 @@ fn mount_opts(fstype: &str) -> String {
 pub fn mount_device(cfg: &mut Config, config_path: &Path, device: &str) -> Result<Partition, ApiError> {
     util::require_privileged()?;
     let inv = inventory(cfg)?;
-    let (_disk, part) = find_part(&inv, device).ok_or(ApiError::NotFound)?;
-    if !part.removable {
-        return Err(ApiError::BadRequest("only removable media can be mounted here".into()));
-    }
+    let (disk, part) = find_part(&inv, device).ok_or(ApiError::NotFound)?;
+    refuse_disk(disk)?;
     refuse_system(part)?;
     if !part.mountpoint.is_empty() {
         return Ok(part.clone());
@@ -372,7 +416,8 @@ pub fn mount_device(cfg: &mut Config, config_path: &Path, device: &str) -> Resul
         safe_label(&part.label)
     };
     let dest = PathBuf::from(MEDIA_ROOT).join(&label);
-    std::fs::create_dir_all(&dest)?;
+    std::fs::create_dir_all(&dest)
+        .map_err(|e| ApiError::BadRequest(format!("could not create mount point: {e}")))?;
     let opts = mount_opts(&part.fstype);
     let src = format!("UUID={}", part.uuid);
     util::run_ok("mount", &["-o", &opts, &src, &dest.display().to_string()])?;
@@ -406,10 +451,8 @@ pub fn unmount_device(
 ) -> Result<UnmountResult, ApiError> {
     util::require_privileged()?;
     let inv = inventory(cfg)?;
-    let (_disk, part) = find_part(&inv, target).ok_or(ApiError::NotFound)?;
-    if !part.removable {
-        return Err(ApiError::BadRequest("only removable media can be ejected here".into()));
-    }
+    let (disk, part) = find_part(&inv, target).ok_or(ApiError::NotFound)?;
+    refuse_disk(disk)?;
     refuse_system(part)?;
     let mp = if part.mountpoint.is_empty() {
         return Ok(UnmountResult {
@@ -474,7 +517,8 @@ fn busy_pids(mount: &str) -> Vec<u32> {
 
 pub fn add_to_files(cfg: &mut Config, config_path: &Path, device: &str) -> Result<FileRoot, ApiError> {
     let inv = inventory(cfg)?;
-    let (_disk, part) = find_part(&inv, device).ok_or(ApiError::NotFound)?;
+    let (disk, part) = find_part(&inv, device).ok_or(ApiError::NotFound)?;
+    refuse_disk(disk)?;
     if part.mountpoint.is_empty() {
         return Err(ApiError::BadRequest("mount the volume first".into()));
     }
@@ -524,6 +568,127 @@ pub fn add_to_files(cfg: &mut Config, config_path: &Path, device: &str) -> Resul
     Ok(root)
 }
 
+fn find_disk<'a>(inv: &'a Inventory, device: &str) -> Option<&'a Disk> {
+    inv.disks.iter().find(|d| d.path == device || d.name == device)
+}
+
+fn wait_for_dev(path: &str) -> Result<(), ApiError> {
+    for _ in 0..40 {
+        if Path::new(path).exists() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(ApiError::BadRequest(format!(
+        "device {path} did not appear after partitioning"
+    )))
+}
+
+fn mkfs(fstype: &str, label: &str, dev: &str) -> Result<(), ApiError> {
+    let label = if label.is_empty() { "data" } else { label };
+    match fstype {
+        "ext4" => {
+            if !util::which("mkfs.ext4") {
+                return Err(ApiError::BadRequest("mkfs.ext4 is not installed".into()));
+            }
+            util::run_ok("mkfs.ext4", &["-F", "-q", "-L", label, "-m", "0", dev])?;
+        }
+        "xfs" => {
+            if !util::which("mkfs.xfs") {
+                return Err(ApiError::BadRequest("mkfs.xfs is not installed".into()));
+            }
+            util::run_ok("mkfs.xfs", &["-f", "-L", label, dev])?;
+        }
+        "btrfs" => {
+            if !util::which("mkfs.btrfs") {
+                return Err(ApiError::BadRequest("mkfs.btrfs is not installed".into()));
+            }
+            util::run_ok("mkfs.btrfs", &["-f", "-L", label, dev])?;
+        }
+        "exfat" => {
+            if !util::which("mkfs.exfat") {
+                return Err(ApiError::BadRequest("mkfs.exfat is not installed".into()));
+            }
+            util::run_ok("mkfs.exfat", &["-n", label, dev])?;
+        }
+        _ => {
+            return Err(ApiError::BadRequest(
+                "filesystem must be ext4, xfs, btrfs, or exfat".into(),
+            ))
+        }
+    }
+    Ok(())
+}
+
+fn unmount_if_needed(mp: &str) -> Result<(), ApiError> {
+    if mp.is_empty() {
+        return Ok(());
+    }
+    if is_system_mount(mp, Path::new("/nonexistent")) {
+        return Err(ApiError::BadRequest(
+            "refusing to unmount a system path".into(),
+        ));
+    }
+    let out = util::run("umount", &[mp])?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let _ = util::run("umount", &["-l", mp]);
+    Ok(())
+}
+
+/// Wipe a non-system disk (GPT + one partition) or reformat a partition, then mount it.
+pub fn format_and_mount(
+    cfg: &mut Config,
+    config_path: &Path,
+    device: &str,
+    fstype: &str,
+    label: &str,
+) -> Result<Partition, ApiError> {
+    util::require_privileged()?;
+    let device = valid_dev(device)?.to_string();
+    let fstype = fstype.trim().to_ascii_lowercase();
+    if !matches!(fstype.as_str(), "ext4" | "xfs" | "btrfs" | "exfat") {
+        return Err(ApiError::BadRequest(
+            "filesystem must be ext4, xfs, btrfs, or exfat".into(),
+        ));
+    }
+    let label = {
+        let s = safe_label(label);
+        let max = if fstype == "exfat" { 15 } else { 16 };
+        s.chars().take(max).collect::<String>()
+    };
+    let inv = inventory(cfg)?;
+    if let Some(disk) = find_disk(&inv, &device) {
+        refuse_disk(disk)?;
+        for p in &disk.partitions {
+            refuse_system(p)?;
+            unmount_if_needed(&p.mountpoint)?;
+        }
+        if !util::which("parted") {
+            return Err(ApiError::BadRequest("parted is required to format a disk".into()));
+        }
+        util::run_ok(
+            "parted",
+            &["-s", &disk.path, "--", "mklabel", "gpt", "mkpart", "primary", "1MiB", "100%"],
+        )?;
+        let _ = util::run("partprobe", &[&disk.path]);
+        let _ = util::run("udevadm", &["settle", "-t", "8"]);
+        let part_path = partition_node(&disk.path);
+        wait_for_dev(&part_path)?;
+        mkfs(&fstype, &label, &part_path)?;
+        let _ = util::run("udevadm", &["settle", "-t", "8"]);
+        return mount_device(cfg, config_path, &part_path);
+    }
+    let (disk, part) = find_part(&inv, &device).ok_or(ApiError::NotFound)?;
+    refuse_disk(disk)?;
+    refuse_system(part)?;
+    unmount_if_needed(&part.mountpoint)?;
+    mkfs(&fstype, &label, &part.path)?;
+    let _ = util::run("udevadm", &["settle", "-t", "8"]);
+    mount_device(cfg, config_path, &part.path)
+}
+
 pub fn remount_persisted(cfg: &Config) {
     if !privileged() {
         return;
@@ -556,5 +721,36 @@ pub fn remount_persisted(cfg: &Config) {
             ),
             Err(err) => tracing::warn!("remount {}: {err}", m.uuid),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partition_node_nvme_and_sata() {
+        assert_eq!(partition_node("/dev/sdb"), "/dev/sdb1");
+        assert_eq!(partition_node("/dev/nvme0n1"), "/dev/nvme0n1p1");
+        assert_eq!(partition_node("/dev/mmcblk0"), "/dev/mmcblk0p1");
+    }
+
+    #[test]
+    fn valid_dev_rejects_junk() {
+        assert!(valid_dev("/dev/sdb").is_ok());
+        assert!(valid_dev("/dev/nvme0n1p2").is_ok());
+        assert!(valid_dev("../dev/sdb").is_err());
+        assert!(valid_dev("/dev/sda;reboot").is_err());
+        assert!(valid_dev("/tmp/x").is_err());
+    }
+
+    #[test]
+    fn system_mounts_are_protected() {
+        let data = Path::new("/var/lib/coduos");
+        assert!(is_system_mount("/", data));
+        assert!(is_system_mount("/boot/efi", data));
+        assert!(is_system_mount("/home", data));
+        assert!(!is_system_mount("/media/coduos/data", data));
+        assert!(!is_system_mount("/mnt/disk", data));
     }
 }

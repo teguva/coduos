@@ -27,8 +27,10 @@
     peers: Peer[];
     error?: string | null;
   };
+  type Net = { ipv4?: string | null; operstate: string; virtual_iface: boolean };
 
   let status = $state<Status | null>(null);
+  let lanIp = $state('');
   let error = $state('');
   let notice = $state('');
   let name = $state('');
@@ -42,6 +44,14 @@
 
   onMount(() => {
     load().catch((e) => (error = e.message));
+    api<{ networks: Net[] }>('/api/system/summary')
+      .then((s) => {
+        const real = (s.networks || []).filter(
+          (n) => !n.virtual_iface && n.ipv4 && !n.ipv4.startsWith('127.')
+        );
+        lanIp = (real.find((n) => n.operstate === 'up') || real[0])?.ipv4 || '';
+      })
+      .catch(() => {});
     const t = setInterval(() => load().catch(() => {}), 5000);
     return () => clearInterval(t);
   });
@@ -95,6 +105,8 @@
     if (ago < 3600) return `${Math.round(ago / 60)}m ago`;
     return `${Math.round(ago / 3600)}h ago`;
   }
+
+  let wgPort = $derived(status?.listen_port || 51820);
 </script>
 
 {#if !status?.privileged}
@@ -125,6 +137,7 @@
     disabled={!status?.privileged}
   />
 </label>
+<p class="hint">Hostname or public IP of the router on the internet. The listen port is added automatically. Use dynamic DNS if the ISP address changes.</p>
 <label class="field"><span>DNS for clients</span>
   <input
     value={status?.dns ?? ''}
@@ -133,6 +146,20 @@
     disabled={!status?.privileged}
   />
 </label>
+
+<h3 class="group-title">Port forwarding</h3>
+<p class="hint">Clients outside the house need one UDP rule on the router (also called Virtual Server or NAT). Forward to this NAS, not to a phone or PC.</p>
+<div class="fwd-grid">
+  <div><span class="meta">Protocol</span><strong>UDP</strong></div>
+  <div><span class="meta">External port</span><strong>{wgPort}</strong></div>
+  <div><span class="meta">Internal IP</span><strong>{lanIp || 'this NAS LAN address'}</strong></div>
+  <div><span class="meta">Internal port</span><strong>{wgPort}</strong></div>
+</div>
+<ol class="tips">
+  <li>Reserve {lanIp ? lanIp : 'this NAS'} in DHCP so the forward does not break after a reboot.</li>
+  <li>Do not use TCP, and do not forward 80 or 443 for WireGuard.</li>
+  <li>If the WAN address is 10.x, 100.64–100.127.x, or the ISP says CGNAT, port forwarding will not work from the internet.</li>
+</ol>
 
 <h3 class="group-title">Clients</h3>
 <form class="row" onsubmit={addPeer} style="margin-bottom:12px">
