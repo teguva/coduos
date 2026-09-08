@@ -44,3 +44,12 @@ export function prettyGpu(name: string): string {
   if (/amd/i.test(name) && /0x[0-9a-f]{4}/i.test(name)) return 'AMD graphics';
   return name;
 }
+
+export function watts(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '—';
+  return n < 10 ? `${n.toFixed(1)} W` : `${Math.round(n)} W`;
+}
+
+export function joinMeta(parts: Array<string | null | undefined | false>): string {
+  return parts.filter((p): p is string => Boolean(p)).join(' · ');
+}

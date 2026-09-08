@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, toggleTheme, isLight } from '../lib/api';
-  import { bytes, bps, pct, uptime, shortOs, prettyGpu } from '../lib/format';
+  import { bytes, bps, pct, uptime, shortOs, prettyGpu, watts, joinMeta } from '../lib/format';
   import { appIcons, appIcon, iconRev } from '../lib/icons';
   import Icon from './Icon.svelte';
+  import Sparkline from './Sparkline.svelte';
 
   let { username, go, onLogout, path } = $props<{
     username: string;
@@ -28,6 +29,7 @@
     mem_used?: number | null;
     mem_total?: number | null;
     temp_c?: number | null;
+    power_w?: number | null;
   };
   type Proc = { pid: number; name: string; cpu_percent: number; mem_bytes: number };
   type Summary = {
@@ -37,6 +39,7 @@
     cpu_percent: number;
     cpu_cores: number;
     cpu_temp_c?: number | null;
+    cpu_power_w?: number | null;
     mem_used: number;
     mem_total: number;
     disks: { name: string; mount: string; total: number; used: number }[];
@@ -58,6 +61,7 @@
   let light = $state(isLight());
   let now = $state(new Date());
   let menu = $state(false);
+  let netHist = $state<{ rx: number; tx: number }[]>([]);
 
   let primaryNet = $derived(
     (summary?.networks ?? []).find((n) => !n.virtual_iface && n.operstate === 'up') ||
@@ -91,12 +95,27 @@
     es.onmessage = (ev) => {
       try {
         summary = JSON.parse(ev.data);
+        const nets: Net[] = summary?.networks ?? [];
+        const n =
+          nets.find((x) => !x.virtual_iface && x.operstate === 'up') ||
+          nets.find((x) => !x.virtual_iface);
+        if (n) {
+          netHist = [...netHist, { rx: n.rx_bps, tx: n.tx_bps }].slice(-90);
+        }
       } catch {
         /* ignore */
       }
     };
     api<Summary>('/api/system/summary')
-      .then((s) => (summary = s))
+      .then((s) => {
+        summary = s;
+        const n =
+          (s.networks ?? []).find((x) => !x.virtual_iface && x.operstate === 'up') ||
+          (s.networks ?? []).find((x) => !x.virtual_iface);
+        if (n) {
+          netHist = [{ rx: n.rx_bps, tx: n.tx_bps }];
+        }
+      })
       .catch(() => {});
     api<App[]>('/api/apps')
       .then((a) => (apps = a))
@@ -147,17 +166,31 @@
           <div class="gauge" style="--p:{summary.cpu_percent}"><span>{summary.cpu_percent.toFixed(0)}%</span></div>
           <div>
             <h3><Icon name="cpu" size={16} alt="" /> CPU</h3>
-            <div>{summary.cpu_cores} cores{#if summary.cpu_temp_c != null} · {summary.cpu_temp_c.toFixed(0)}°C{/if}</div>
+            <div>
+              {joinMeta([
+                summary.cpu_power_w != null ? watts(summary.cpu_power_w) : null,
+                `${summary.cpu_cores} cores`,
+                summary.cpu_temp_c != null ? `${summary.cpu_temp_c.toFixed(0)}°C` : null
+              ])}
+            </div>
             <div class="meta clip">{shortOs(summary.os)}</div>
           </div>
         </button>
         {#if gpu}
           <button class="widget hit" onclick={() => tap('/tasks')}>
-            <div class="gauge" style="--p:{gpu.util_percent ?? 0}"><span>{gpu.util_percent != null ? gpu.util_percent.toFixed(0) + '%' : 'GPU'}</span></div>
+            <div class="gauge" style="--p:{gpu.util_percent ?? 0}">
+              <span>{gpu.util_percent != null ? gpu.util_percent.toFixed(0) + '%' : 'GPU'}</span>
+            </div>
             <div>
               <h3>GPU</h3>
               <div class="clip">{prettyGpu(gpu.name)}</div>
-              <div class="meta">{#if gpu.temp_c != null}{gpu.temp_c.toFixed(0)}°C{/if}{#if gpu.mem_used != null && gpu.mem_total} · {bytes(gpu.mem_used)} / {bytes(gpu.mem_total)}{/if}</div>
+              <div class="meta">
+                {joinMeta([
+                  gpu.power_w != null ? watts(gpu.power_w) : null,
+                  gpu.temp_c != null ? `${gpu.temp_c.toFixed(0)}°C` : null,
+                  gpu.mem_used != null && gpu.mem_total ? `${bytes(gpu.mem_used)} / ${bytes(gpu.mem_total)}` : null
+                ]) || 'Integrated graphics'}
+              </div>
             </div>
           </button>
         {/if}
@@ -169,13 +202,13 @@
           </div>
         </button>
         {#if primaryNet}
-          <button class="widget hit" onclick={() => tap('/network')}>
-            <div class="gauge plain"><span>↓↑</span></div>
+          <button class="widget widget-net hit" onclick={() => tap('/network')}>
             <div>
               <h3><Icon name={appIcons.network} size={16} alt="" /> Network</h3>
               <div>↓ {bps(primaryNet.rx_bps)} ↑ {bps(primaryNet.tx_bps)}</div>
               <div class="meta clip">{primaryNet.ipv4 || primaryNet.name}</div>
             </div>
+            <Sparkline rx={netHist.map((s) => s.rx)} tx={netHist.map((s) => s.tx)} />
           </button>
         {/if}
         {#if worstDisk}

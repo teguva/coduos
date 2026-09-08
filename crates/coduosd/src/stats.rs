@@ -18,6 +18,7 @@ pub struct SystemSummary {
     pub cpu_percent: f32,
     pub cpu_cores: usize,
     pub cpu_temp_c: Option<f32>,
+    pub cpu_power_w: Option<f32>,
     pub mem_used: u64,
     pub mem_total: u64,
     pub swap_used: u64,
@@ -68,6 +69,7 @@ pub struct GpuInfo {
     pub mem_used: Option<u64>,
     pub mem_total: Option<u64>,
     pub temp_c: Option<f32>,
+    pub power_w: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,6 +100,7 @@ impl Default for SystemSummary {
             cpu_percent: 0.0,
             cpu_cores: 0,
             cpu_temp_c: None,
+            cpu_power_w: None,
             mem_used: 0,
             mem_total: 0,
             swap_used: 0,
@@ -123,6 +126,8 @@ struct Collector {
     nets: Networks,
     prev_net: HashMap<String, (u64, u64)>,
     prev_at: Instant,
+    prev_rapl_uj: Option<u64>,
+    prev_rapl_at: Option<Instant>,
 }
 
 pub fn spawn_collector(tx: tokio::sync::watch::Sender<SystemSummary>) {
@@ -132,6 +137,8 @@ pub fn spawn_collector(tx: tokio::sync::watch::Sender<SystemSummary>) {
             nets: Networks::new_with_refreshed_list(),
             prev_net: HashMap::new(),
             prev_at: Instant::now(),
+            prev_rapl_uj: None,
+            prev_rapl_at: None,
         };
         loop {
             let summary = col.collect();
@@ -232,6 +239,7 @@ impl Collector {
             }
         }
         let cpu_temp_c = pick_cpu_temp(&sensors);
+        let cpu_power_w = self.cpu_power_w();
         let gpus = collect_gpus(&sensors);
 
         let mut processes: Vec<ProcInfo> = self
@@ -270,6 +278,7 @@ impl Collector {
             cpu_percent: self.sys.global_cpu_usage(),
             cpu_cores: self.sys.cpus().len(),
             cpu_temp_c,
+            cpu_power_w,
             mem_used: self.sys.used_memory(),
             mem_total: self.sys.total_memory(),
             swap_used: self.sys.used_swap(),
@@ -283,6 +292,28 @@ impl Collector {
             version: env!("CARGO_PKG_VERSION").into(),
             privileged: crate::config::running_as_root(),
         }
+    }
+
+    fn cpu_power_w(&mut self) -> Option<f32> {
+        if let Some(w) = hwmon_cpu_power_w() {
+            return Some(w);
+        }
+        let now = Instant::now();
+        let energy = package_energy_uj()?;
+        let watts = if let (Some(prev), Some(at)) = (self.prev_rapl_uj, self.prev_rapl_at) {
+            let dt = now.duration_since(at).as_secs_f64();
+            if dt >= 0.4 {
+                let duj = energy.saturating_sub(prev) as f64;
+                Some((duj / dt / 1_000_000.0) as f32)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.prev_rapl_uj = Some(energy);
+        self.prev_rapl_at = Some(now);
+        watts.filter(|w| w.is_finite() && *w >= 0.0 && *w < 2000.0)
     }
 }
 
@@ -497,7 +528,7 @@ fn collect_gpus(sensors: &[SensorInfo]) -> Vec<GpuInfo> {
 fn nvidia_gpus() -> Vec<GpuInfo> {
     let out = std::process::Command::new("nvidia-smi")
         .args([
-            "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+            "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
             "--format=csv,noheader,nounits",
         ])
         .output();
@@ -527,9 +558,106 @@ fn nvidia_gpus() -> Vec<GpuInfo> {
                     .ok()
                     .map(|mib| (mib * 1024.0 * 1024.0) as u64),
                 temp_c: parts[4].parse().ok(),
+                power_w: parts.get(5).and_then(|s| s.parse().ok()),
             })
         })
         .collect()
+}
+
+fn sysfs_u64(path: &PathBuf) -> Option<u64> {
+    sysfs_trim(&path.display().to_string()).parse().ok()
+}
+
+fn sysfs_f32_milli(path: &PathBuf) -> Option<f32> {
+    sysfs_u64(path).map(|v| v as f32 / 1000.0)
+}
+
+fn sysfs_f32_micro(path: &PathBuf) -> Option<f32> {
+    sysfs_u64(path).map(|v| v as f32 / 1_000_000.0)
+}
+
+fn first_hwmon(dev: &PathBuf) -> Option<PathBuf> {
+    let dir = std::fs::read_dir(dev.join("hwmon")).ok()?;
+    dir.flatten()
+        .map(|e| e.path())
+        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("hwmon")))
+}
+
+fn hwmon_temp_c(hwmon: &PathBuf) -> Option<f32> {
+    for i in 1..=8 {
+        if let Some(t) = sysfs_f32_milli(&hwmon.join(format!("temp{i}_input"))) {
+            if t > 0.0 && t < 120.0 {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+fn hwmon_power_w(hwmon: &PathBuf) -> Option<f32> {
+    sysfs_f32_micro(&hwmon.join("power1_input"))
+        .or_else(|| sysfs_f32_micro(&hwmon.join("power1_average")))
+        .filter(|w| *w > 0.0 && *w < 2000.0)
+}
+
+fn gpu_busy(dev: &PathBuf, card: &PathBuf) -> Option<f32> {
+    sysfs_trim(&dev.join("gpu_busy_percent").display().to_string())
+        .parse()
+        .ok()
+        .or_else(|| {
+            sysfs_trim(&card.join("gt/gt0/rps_busy_percentage").display().to_string())
+                .parse()
+                .ok()
+        })
+        .or_else(|| {
+            sysfs_trim(&dev.join("gt/gt0/rps_busy_percentage").display().to_string())
+                .parse()
+                .ok()
+        })
+}
+
+fn hwmon_cpu_power_w() -> Option<f32> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/hwmon") else {
+        return None;
+    };
+    for ent in entries.flatten() {
+        let p = ent.path();
+        let name = sysfs_trim(&p.join("name").display().to_string()).to_ascii_lowercase();
+        if !(name.contains("zenpower")
+            || name.contains("amd_energy")
+            || name.contains("rapl")
+            || name == "corepower")
+        {
+            continue;
+        }
+        if let Some(w) = hwmon_power_w(&p) {
+            return Some(w);
+        }
+    }
+    None
+}
+
+fn package_energy_uj() -> Option<u64> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/powercap") else {
+        return None;
+    };
+    let mut fallback = None;
+    for ent in entries.flatten() {
+        let p = ent.path();
+        let fname = p.file_name()?.to_string_lossy().into_owned();
+        let name = sysfs_trim(&p.join("name").display().to_string()).to_ascii_lowercase();
+        let energy = sysfs_u64(&p.join("energy_uj"));
+        let Some(uj) = energy else {
+            continue;
+        };
+        if name.starts_with("package") {
+            return Some(uj);
+        }
+        if fname.contains("rapl") && fname.ends_with(":0") && !fname.contains(":0:") {
+            fallback = Some(uj);
+        }
+    }
+    fallback
 }
 
 fn sysfs_gpus(sensors: &[SensorInfo]) -> Vec<GpuInfo> {
@@ -543,25 +671,32 @@ fn sysfs_gpus(sensors: &[SensorInfo]) -> Vec<GpuInfo> {
         if !name.starts_with("card") || name.contains('-') {
             continue;
         }
-        let dev = ent.path().join("device");
-        let vendor = sysfs_trim(&dev.join("vendor").display().to_string());
-        let vendor = match vendor.to_ascii_lowercase().as_str() {
+        let card = ent.path();
+        let dev = card.join("device");
+        let vendor_id = sysfs_trim(&dev.join("vendor").display().to_string()).to_ascii_lowercase();
+        let vendor = match vendor_id.as_str() {
             "0x1002" => "amd",
             "0x8086" => "intel",
-            "0x10de" => continue, // nvidia-smi path
+            "0x10de" => continue,
             _ => continue,
         };
-        let util = sysfs_trim(&dev.join("gpu_busy_percent").display().to_string())
-            .parse::<f32>()
-            .ok();
-        let label_key = if vendor == "amd" { "amdgpu" } else { "i915" };
-        let temp = sensors
-            .iter()
-            .find(|s| s.label.to_ascii_lowercase().contains(label_key))
-            .map(|s| s.temp_c);
-        if util.is_none() && temp.is_none() && vendor == "intel" {
-            // Intel without busy % still shown if we have a PCI device name
+        let hwmon = first_hwmon(&dev);
+        let mut temp = hwmon.as_ref().and_then(hwmon_temp_c);
+        if temp.is_none() {
+            let keys = match vendor {
+                "amd" => ["amdgpu", "edge", "junction"],
+                "intel" => ["i915", "xe", "igpu"],
+                _ => ["gpu", "drm", "igpu"],
+            };
+            temp = sensors.iter().find_map(|s| {
+                let l = s.label.to_ascii_lowercase();
+                keys.iter().find(|k| l.contains(*k)).map(|_| s.temp_c)
+            });
         }
+        let power_w = hwmon.as_ref().and_then(hwmon_power_w);
+        let util = gpu_busy(&dev, &card);
+        let mem_used = sysfs_u64(&dev.join("mem_info_vram_used"));
+        let mem_total = sysfs_u64(&dev.join("mem_info_vram_total")).filter(|n| *n > 0);
         let pretty = match vendor {
             "amd" => "AMD graphics".into(),
             "intel" => "Intel graphics".into(),
@@ -571,9 +706,10 @@ fn sysfs_gpus(sensors: &[SensorInfo]) -> Vec<GpuInfo> {
             name: pretty,
             vendor: vendor.into(),
             util_percent: util,
-            mem_used: None,
-            mem_total: None,
+            mem_used,
+            mem_total,
             temp_c: temp,
+            power_w,
         });
     }
     out
