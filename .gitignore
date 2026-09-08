@@ -1,0 +1,11 @@
+/target
+/data
+/coduos.toml
+/dist
+/web/node_modules
+/web/dist
+*.db
+.tools
+.idea
+.vscode
+.env

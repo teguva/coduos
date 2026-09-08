@@ -1,0 +1,20 @@
+bind = "0.0.0.0:80"
+data_dir = "/var/lib/coduos"
+www_dir = "/usr/share/coduos/www"
+github_owner = "teguva"
+github_repo = "coduos"
+
+[[file_roots]]
+id = "home"
+label = "Home"
+path = "/home"
+
+[[units]]
+id = "docker"
+unit = "docker.service"
+label = "Docker"
+
+[[units]]
+id = "ssh"
+unit = "ssh.service"
+label = "SSH"
