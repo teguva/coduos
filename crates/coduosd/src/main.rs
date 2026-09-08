@@ -32,7 +32,7 @@ use tracing_subscriber::EnvFilter;
 use crate::state::AppState;
 
 #[derive(Parser, Debug)]
-#[command(name = "coduosd", about = "CoduOS dashboard daemon")]
+#[command(name = "coduosd", about = "CoduOS dashboard daemon", version)]
 struct Cli {
     #[arg(short, long, env = "CODUOS_CONFIG")]
     config: Option<PathBuf>,

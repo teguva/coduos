@@ -389,7 +389,7 @@
       {#if !settings?.privileged}
         <div class="banner">Updating from here needs the installed daemon running as root.</div>
       {:else if update.can_apply === false}
-        <p class="hint">This copy is not the installed service. Use the installer on the NAS, or run CoduOS from /usr/bin/coduosd.</p>
+        <p class="hint">This copy is not the installed service. On the NAS, run <code>scripts/update.sh</code> as root.</p>
       {/if}
       <div class="row">
         <button
@@ -407,6 +407,7 @@
       <a class="btn secondary" href={update.html_url} target="_blank" rel="noreferrer">Open GitHub release</a>
     {/if}
     <p class="hint">github.com/{settings?.github_owner}/{settings?.github_repo}</p>
+    <p class="hint">CLI: <code>curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/update.sh | sudo bash</code></p>
   {/if}
 </section>
 

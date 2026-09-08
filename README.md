@@ -21,7 +21,15 @@ sudo CODUOS_DOCKER=yes CODUOS_NGINX=yes CODUOS_WIREGUARD=no bash -c \
 
 Open `http://<host>/` if nginx was enabled, otherwise `http://<host>:13209/`. Create the admin account, then install apps from Compose YAML.
 
-Update: run the same installer again (keeps `/etc/coduos/coduos.toml` and `/var/lib/coduos`). You will be asked about services again; saying no does not remove packages already installed.
+## Update
+
+Replaces the daemon and web UI. Keeps `/etc/coduos` and `/var/lib/coduos`. Does not touch Docker, nginx, or WireGuard.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/update.sh | sudo bash
+```
+
+On an installed NAS you can also use **Settings → Updates → Update now**.
 
 Uninstall:
 
@@ -49,7 +57,7 @@ Unprivileged dev binds `http://127.0.0.1:13209` and stores data in `./data`. Vit
 crates/coduosd/   # Axum daemon
 web/              # Svelte 5 SPA
 packaging/        # systemd unit, default config, example compose
-scripts/          # install, uninstall, pack-release
+scripts/          # install, update, uninstall, pack-release
 ```
 
 Config: `/etc/coduos/coduos.toml` (bind, data dir, file roots, unit allowlist).

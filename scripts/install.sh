@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Install or update CoduOS from a GitHub Release tarball (or a local tarball path).
-# Prompts for Docker, nginx, and WireGuard; installs packages when you say yes.
+# Install CoduOS from a GitHub Release tarball (or a local tarball path).
+# First-time only: prompts for Docker, nginx, and WireGuard.
+# To update an existing install, use scripts/update.sh.
 #
 # Non-interactive (CI / unattended):
 #   CODUOS_DOCKER=yes CODUOS_NGINX=yes CODUOS_WIREGUARD=no sudo -E bash scripts/install.sh
@@ -108,9 +109,26 @@ ask_yes() {
   [[ "${reply}" =~ ^[Yy] ]]
 }
 
-echo "CoduOS installer"
+echo "CoduOS installer (first-time setup)"
 echo "Choose which host services to install and enable."
 echo
+echo "Already installed? Update instead:"
+echo "  curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/update.sh | sudo bash"
+echo
+
+if [[ -x /usr/bin/coduosd ]]; then
+  echo "CoduOS is already on this machine (/usr/bin/coduosd)."
+  echo "This script is the first-time installer (Docker / nginx / WireGuard)."
+  echo "To update CoduOS only, run:"
+  echo "  curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/update.sh | sudo bash"
+  echo
+  if [[ "${CODUOS_FORCE_INSTALL:-}" != "1" ]]; then
+    echo "Refusing to re-run the installer. Set CODUOS_FORCE_INSTALL=1 to continue anyway." >&2
+    exit 1
+  fi
+  echo "CODUOS_FORCE_INSTALL=1 set; continuing with first-time installer prompts."
+  echo
+fi
 
 WITH_DOCKER=0
 WITH_NGINX=0
