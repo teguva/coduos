@@ -35,6 +35,7 @@
     health?: string | null;
   };
   type Inventory = { privileged: boolean; disks: Disk[] };
+  type Role = 'swap' | 'efi' | 'boot' | 'system' | 'usb' | 'data' | 'unmounted';
 
   let inv = $state<Inventory | null>(null);
   let error = $state('');
@@ -54,11 +55,58 @@
     return [d.vendor, d.model].filter(Boolean).join(' ').trim() || d.name;
   }
 
-  function chip(p: Partition, d: Disk) {
-    if (p.system || d.system) return 'System';
-    if (p.mountpoint) return 'Mounted';
-    if (d.removable || p.removable) return 'USB';
-    return p.fstype || 'Disk';
+  function role(p: Partition, d: Disk): Role {
+    const fs = (p.fstype || '').toLowerCase();
+    const mp = p.mountpoint || '';
+    if (fs === 'swap' || mp.toUpperCase().includes('SWAP')) return 'swap';
+    if (mp === '/boot/efi' || (mp.toLowerCase().includes('efi') && mp.includes('boot'))) return 'efi';
+    if (mp === '/boot') return 'boot';
+    if (!mp && fs === 'vfat' && p.size > 0 && p.size < 4 * 1024 ** 3 && d.partitions.some((x) => /ext4|xfs|btrfs|f2fs/.test((x.fstype || '').toLowerCase()))) {
+      return 'efi';
+    }
+    if (mp === '/' || mp === '/usr') return 'system';
+    if (d.removable || p.removable) return 'usb';
+    if (mp) return 'data';
+    return 'unmounted';
+  }
+
+  function chipLabel(kind: Role, p: Partition) {
+    switch (kind) {
+      case 'swap':
+        return 'Swap';
+      case 'efi':
+        return 'EFI';
+      case 'boot':
+        return 'Boot';
+      case 'system':
+        return 'System';
+      case 'usb':
+        return p.mountpoint ? 'USB' : 'USB';
+      case 'data':
+        return 'Data';
+      default:
+        return p.fstype ? p.fstype.toUpperCase() : 'Unmounted';
+    }
+  }
+
+  function filesAction(p: Partition, d: Disk): 'open' | 'add' | null {
+    const kind = role(p, d);
+    if (kind === 'swap' || kind === 'efi' || kind === 'boot') return null;
+    if (p.in_files) return 'open';
+    if (kind === 'system') return null;
+    if (p.mountpoint && p.mountpoint.startsWith('/')) return 'add';
+    return null;
+  }
+
+  function showUsage(p: Partition, d: Disk) {
+    const kind = role(p, d);
+    return Boolean(p.mountpoint) && kind !== 'swap' && kind !== 'efi' && (p.total ?? p.size) > 0;
+  }
+
+  function displayMount(p: Partition, d: Disk) {
+    const kind = role(p, d);
+    if (kind === 'swap') return 'Swap';
+    return p.mountpoint;
   }
 
   async function mount(device: string) {
@@ -111,6 +159,21 @@
       error = e.message;
     }
   }
+
+  function fallbackPart(d: Disk): Partition {
+    return {
+      name: d.name,
+      path: d.path,
+      size: d.size,
+      fstype: '',
+      label: title(d),
+      uuid: '',
+      mountpoint: '',
+      removable: true,
+      system: false,
+      in_files: false
+    };
+  }
 </script>
 
 {#if !inv?.privileged}
@@ -126,31 +189,42 @@
   <div class="storage-card">
     <div class="storage-head">
       <Icon name="disk" size={28} alt="" />
-      <div>
+      <div class="storage-ident">
         <strong>{title(d)}</strong>
         <div class="meta">{bytes(d.size)} · {d.path}{#if d.transport} · {d.transport}{/if}</div>
       </div>
+      {#if d.health}
+        <span class="chip" class:ok={d.health === 'passed'} class:warn={d.health !== 'passed'}>SMART {d.health}</span>
+      {/if}
     </div>
     {#each d.partitions as p}
+      {@const kind = role(p, d)}
       {@const used = p.used ?? 0}
       {@const total = p.total ?? p.size}
+      {@const action = filesAction(p, d)}
       <div class="part">
-        <div class="row">
-          <span class="chip">{chip(p, d)}</span>
-          <strong>{p.label || p.name}</strong>
-          <span class="meta">{p.fstype || 'unformatted'} · {bytes(p.size)}</span>
-        </div>
-        {#if p.mountpoint}
-          <div class="bar"><i style="width:{pct(used, total)}%"></i></div>
-          <div class="meta">{p.mountpoint} · {bytes(used)} / {bytes(total)}{#if p.health} · SMART {p.health}{/if}</div>
-        {/if}
-        <div class="row">
-          {#if p.in_files}
-            <button class="btn" onclick={() => go('/files')}>Open in Files</button>
+        <div class="part-main">
+          <div class="part-title">
+            <span class="chip" class:ok={kind === 'system' || kind === 'data'} class:muted={kind === 'swap' || kind === 'efi' || kind === 'boot' || kind === 'unmounted'}>{chipLabel(kind, p)}</span>
+            <strong>{p.label || p.name}</strong>
+            <span class="meta">{p.fstype || 'unformatted'} · {bytes(p.size)}</span>
+          </div>
+          {#if showUsage(p, d)}
+            <div class="bar"><i style="width:{pct(used, total)}%"></i></div>
+            <div class="meta">{displayMount(p, d)} · {bytes(used)} / {bytes(total)}</div>
           {:else if p.mountpoint}
-            <button class="btn" onclick={() => useInFiles(p.path)}>Use in Files</button>
+            <div class="meta">{displayMount(p, d)}</div>
           {/if}
         </div>
+        {#if action}
+          <div class="part-actions">
+            {#if action === 'open'}
+              <button class="btn compact secondary" onclick={() => go('/files')}>Open in Files</button>
+            {:else}
+              <button class="btn compact secondary" onclick={() => useInFiles(p.path)}>Use in Files</button>
+            {/if}
+          </div>
+        {/if}
       </div>
     {/each}
   </div>
@@ -164,33 +238,41 @@
   <div class="storage-card">
     <div class="storage-head">
       <Icon name="disk" size={28} alt="" />
-      <div>
+      <div class="storage-ident">
         <strong>{title(d)}</strong>
         <div class="meta">{bytes(d.size)} · {d.path}</div>
       </div>
+      {#if d.health}
+        <span class="chip" class:ok={d.health === 'passed'} class:warn={d.health !== 'passed'}>SMART {d.health}</span>
+      {/if}
     </div>
-    {#each d.partitions.length ? d.partitions : [{ ...d, name: d.name, path: d.path, fstype: '', label: title(d), uuid: '', mountpoint: '', removable: true, system: false, in_files: false } as any] as p}
+    {#each d.partitions.length ? d.partitions : [fallbackPart(d)] as p}
+      {@const kind = role(p, d)}
       {@const used = p.used ?? 0}
       {@const total = p.total ?? p.size}
+      {@const action = filesAction(p, d)}
       <div class="part">
-        <div class="row">
-          <span class="chip">{p.mountpoint ? 'Mounted' : 'USB'}</span>
-          <strong>{p.label || p.name}</strong>
+        <div class="part-main">
+          <div class="part-title">
+            <span class="chip" class:ok={Boolean(p.mountpoint)} class:muted={!p.mountpoint}>{p.mountpoint ? 'Mounted' : 'USB'}</span>
+            <strong>{p.label || p.name}</strong>
+            <span class="meta">{p.fstype || 'unformatted'} · {bytes(p.size)}</span>
+          </div>
+          {#if showUsage(p, d)}
+            <div class="bar"><i style="width:{pct(used, total)}%"></i></div>
+            <div class="meta">{displayMount(p, d)} · {bytes(used)} / {bytes(total)}</div>
+          {/if}
         </div>
-        {#if p.mountpoint}
-          <div class="bar"><i style="width:{pct(used, total)}%"></i></div>
-          <div class="meta">{p.mountpoint} · {bytes(used)} / {bytes(total)}</div>
-        {/if}
-        <div class="row">
+        <div class="part-actions">
           {#if p.mountpoint}
-            <button class="btn secondary" disabled={!inv?.privileged || busy === p.path} onclick={() => eject(p.path)}>Eject</button>
-            {#if p.in_files}
-              <button class="btn" onclick={() => go('/files')}>Open in Files</button>
-            {:else}
-              <button class="btn" onclick={() => useInFiles(p.path)}>Use in Files</button>
+            <button class="btn compact secondary" disabled={!inv?.privileged || busy === p.path} onclick={() => eject(p.path)}>Eject</button>
+            {#if action === 'open'}
+              <button class="btn compact" onclick={() => go('/files')}>Open in Files</button>
+            {:else if action === 'add'}
+              <button class="btn compact" onclick={() => useInFiles(p.path)}>Use in Files</button>
             {/if}
-          {:else}
-            <button class="btn" disabled={!inv?.privileged || busy === p.path} onclick={() => mount(p.path)}>Mount</button>
+          {:else if kind !== 'swap' && kind !== 'efi'}
+            <button class="btn compact" disabled={!inv?.privileged || busy === p.path} onclick={() => mount(p.path)}>Mount</button>
           {/if}
         </div>
       </div>

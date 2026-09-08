@@ -238,7 +238,15 @@ impl Collector {
             .sys
             .processes()
             .iter()
-            .filter(|(_, p)| p.thread_kind() != Some(ThreadKind::Kernel))
+            .filter(|(pid, p)| {
+                if p.thread_kind() == Some(ThreadKind::Kernel) || pid.as_u32() <= 1 {
+                    return false;
+                }
+                let name = p.name().to_string_lossy();
+                name != "coduosd"
+                    && !name.starts_with("kworker")
+                    && !name.starts_with("ksoftirqd")
+            })
             .map(|(pid, p)| ProcInfo {
                 pid: pid.as_u32(),
                 name: p.name().to_string_lossy().into_owned(),
@@ -554,10 +562,11 @@ fn sysfs_gpus(sensors: &[SensorInfo]) -> Vec<GpuInfo> {
         if util.is_none() && temp.is_none() && vendor == "intel" {
             // Intel without busy % still shown if we have a PCI device name
         }
-        let pretty = std::fs::read_to_string(dev.join("device"))
-            .ok()
-            .map(|s| format!("{vendor} gpu {}", s.trim()))
-            .unwrap_or_else(|| format!("{vendor} gpu"));
+        let pretty = match vendor {
+            "amd" => "AMD graphics".into(),
+            "intel" => "Intel graphics".into(),
+            _ => format!("{vendor} GPU"),
+        };
         out.push(GpuInfo {
             name: pretty,
             vendor: vendor.into(),

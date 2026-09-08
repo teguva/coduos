@@ -25,6 +25,7 @@ pub struct Disk {
     pub transport: String,
     pub removable: bool,
     pub system: bool,
+    pub health: Option<String>,
     pub partitions: Vec<Partition>,
 }
 
@@ -62,6 +63,7 @@ struct LsblkDev {
     label: Option<String>,
     uuid: Option<String>,
     mountpoint: Option<String>,
+    mountpoints: Option<Vec<Option<String>>>,
     tran: Option<String>,
     hotplug: Option<serde_json::Value>,
     model: Option<String>,
@@ -120,23 +122,71 @@ fn is_removable(dev: &LsblkDev, parent_tran: &str, parent_rm: bool) -> bool {
     rm || matches!(tran.as_str(), "usb" | "mmc" | "ieee1394")
 }
 
+fn is_swap(fstype: &str, mount: &str) -> bool {
+    fstype.eq_ignore_ascii_case("swap")
+        || mount.eq_ignore_ascii_case("[SWAP]")
+        || mount.to_ascii_uppercase().starts_with("[SWAP]")
+}
+
+fn mounts_of(dev: &LsblkDev) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(list) = &dev.mountpoints {
+        for m in list {
+            if let Some(s) = m {
+                let s = s.trim();
+                if !s.is_empty() && !out.iter().any(|x| x == s) {
+                    out.push(s.to_string());
+                }
+            }
+        }
+    }
+    let single = opt_str(&dev.mountpoint);
+    if !single.is_empty() && !out.iter().any(|x| x == &single) {
+        out.insert(0, single);
+    }
+    out
+}
+
+fn preferred_mount(mounts: &[String]) -> String {
+    if mounts.iter().any(|m| m == "/") {
+        return "/".into();
+    }
+    mounts
+        .iter()
+        .filter(|m| {
+            !m.starts_with("/var") && !m.starts_with("/run") && *m != "/tmp" && *m != "/srv"
+        })
+        .min_by_key(|m| m.len())
+        .cloned()
+        .or_else(|| mounts.first().cloned())
+        .unwrap_or_default()
+}
+
 fn is_system_mount(mount: &str, data_dir: &Path) -> bool {
     if mount.is_empty() {
         return false;
     }
     let data = data_dir.display().to_string();
     mount == "/"
-        || mount == "/boot"
         || mount == "/usr"
-        || mount == "/boot/efi"
+        || mount.starts_with("/usr/")
+        || mount.starts_with("/boot")
+        || mount.starts_with("/var")
+        || mount.starts_with("/opt")
+        || mount.starts_with("/tmp")
+        || mount.starts_with("/run")
+        || mount.starts_with("/sys")
+        || mount.starts_with("/proc")
         || data == mount
         || Path::new(&data).starts_with(mount)
 }
 
 fn to_partition(dev: &LsblkDev, removable: bool, data_dir: &Path, roots: &[FileRoot]) -> Partition {
-    let mount = opt_str(&dev.mountpoint);
-    let system = is_system_mount(&mount, data_dir);
-    let (used, total) = if mount.is_empty() {
+    let mounts = mounts_of(dev);
+    let mount = preferred_mount(&mounts);
+    let fstype = opt_str(&dev.fstype);
+    let system = mounts.iter().any(|m| is_system_mount(m, data_dir)) || is_swap(&fstype, &mount);
+    let (used, total) = if mount.is_empty() || is_swap(&fstype, &mount) {
         (None, None)
     } else {
         stats::disk_usage_by_mount(&mount)
@@ -148,7 +198,7 @@ fn to_partition(dev: &LsblkDev, removable: bool, data_dir: &Path, roots: &[FileR
         name: opt_str(&dev.name),
         path: path.clone(),
         size: json_u64(&dev.size),
-        fstype: opt_str(&dev.fstype),
+        fstype,
         label: opt_str(&dev.label),
         uuid: opt_str(&dev.uuid),
         mountpoint: mount.clone(),
@@ -159,7 +209,11 @@ fn to_partition(dev: &LsblkDev, removable: bool, data_dir: &Path, roots: &[FileR
         total,
         health: None,
         in_files: roots.iter().any(|r| {
-            !mount.is_empty() && (r.path.display().to_string() == mount || r.path.starts_with(&mount))
+            if mount.is_empty() || mount == "/" {
+                return r.path.display().to_string() == mount;
+            }
+            let rp = r.path.display().to_string();
+            rp == mount || r.path.starts_with(&mount)
         }),
     }
 }
@@ -192,7 +246,7 @@ pub fn inventory(cfg: &Config) -> Result<Inventory, ApiError> {
             "-J",
             "-b",
             "-o",
-            "NAME,PATH,SIZE,TYPE,FSTYPE,LABEL,UUID,MOUNTPOINT,TRAN,HOTPLUG,MODEL,VENDOR,RO,RM",
+            "NAME,PATH,SIZE,TYPE,FSTYPE,LABEL,UUID,MOUNTPOINT,MOUNTPOINTS,TRAN,HOTPLUG,MODEL,VENDOR,RO,RM",
         ],
     )?;
     if !out.status.success() {
@@ -206,7 +260,15 @@ pub fn inventory(cfg: &Config) -> Result<Inventory, ApiError> {
     let mut disks = Vec::new();
     for dev in parsed.blockdevices {
         let kind = opt_str(&dev.kind);
+        let name = opt_str(&dev.name);
         if kind != "disk" && kind != "rom" {
+            continue;
+        }
+        if name.starts_with("zram")
+            || name.starts_with("loop")
+            || name.starts_with("ram")
+            || name.starts_with("dm-")
+        {
             continue;
         }
         let tran = opt_str(&dev.tran);
@@ -221,24 +283,23 @@ pub fn inventory(cfg: &Config) -> Result<Inventory, ApiError> {
         } else if !opt_str(&dev.fstype).is_empty() || !opt_str(&dev.mountpoint).is_empty() {
             parts.push(to_partition(&dev, removable, &cfg.data_dir, &cfg.file_roots));
         }
+        if (kind == "rom" || removable) && json_u64(&dev.size) == 0 && parts.is_empty() {
+            continue;
+        }
         let system = parts.iter().any(|p| p.system)
             || is_system_mount(&opt_str(&dev.mountpoint), &cfg.data_dir);
         let path = dev_path(&dev);
         let health = smart_health(&path);
-        for p in &mut parts {
-            if p.health.is_none() {
-                p.health = health.clone();
-            }
-        }
         disks.push(Disk {
-            name: opt_str(&dev.name),
+            name,
             path,
             size: json_u64(&dev.size),
-            model: opt_str(&dev.model),
-            vendor: opt_str(&dev.vendor),
+            model: opt_str(&dev.model).trim().to_string(),
+            vendor: opt_str(&dev.vendor).trim().to_string(),
             transport: tran,
             removable,
             system,
+            health,
             partitions: parts,
         });
     }
@@ -417,7 +478,13 @@ pub fn add_to_files(cfg: &mut Config, config_path: &Path, device: &str) -> Resul
     if part.mountpoint.is_empty() {
         return Err(ApiError::BadRequest("mount the volume first".into()));
     }
-    if part.system && part.mountpoint == "/" {
+    if is_swap(&part.fstype, &part.mountpoint) {
+        return Err(ApiError::BadRequest("swap cannot be added as a files location".into()));
+    }
+    if part.mountpoint == "/boot" || part.mountpoint == "/boot/efi" {
+        return Err(ApiError::BadRequest("boot partitions cannot be added as a files location".into()));
+    }
+    if part.system && (part.mountpoint == "/" || part.mountpoint == "/usr") {
         return Err(ApiError::BadRequest("the system disk is already available as a location if configured".into()));
     }
     if let Some(existing) = cfg

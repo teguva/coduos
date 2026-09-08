@@ -172,7 +172,7 @@
             <Icon name={view === 'list' ? 'view-grid' : 'view-list'} size={18} alt="" />
           </button>
           <button class="close-x" onclick={onClose} aria-label="Close">
-            <Icon name="close" size={16} alt="" />
+            <Icon name="close" size={18} alt="" />
           </button>
         </div>
       </header>

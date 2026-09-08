@@ -40,7 +40,7 @@
       {#if icon}<Icon name={icon} size={22} alt="" />{/if}
       <h1>{title}</h1>
       <button class="close-x" onclick={onClose} aria-label="Close">
-        <Icon name="close" size={16} alt="" />
+        <Icon name="close" size={18} alt="" />
       </button>
     </header>
     <div class="os-body">

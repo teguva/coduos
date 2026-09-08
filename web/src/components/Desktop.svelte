@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, toggleTheme, isLight } from '../lib/api';
-  import { bytes, bps, pct, uptime } from '../lib/format';
+  import { bytes, bps, pct, uptime, shortOs, prettyGpu } from '../lib/format';
   import { appIcons, appIcon, iconRev } from '../lib/icons';
   import Icon from './Icon.svelte';
 
@@ -43,7 +43,6 @@
     networks: Net[];
     gpus: Gpu[];
     processes: Proc[];
-    docker: { available: boolean; version?: string | null; error?: string | null };
     version: string;
   };
   type App = {
@@ -69,8 +68,23 @@
     if (!disks.length) return null;
     return disks.slice().sort((a, b) => pct(b.used, b.total) - pct(a.used, a.total))[0];
   });
-  let topProc = $derived(summary?.processes?.[0]);
+  let topProc = $derived(
+    (summary?.processes ?? []).find(
+      (p) =>
+        p.pid > 1 &&
+        p.name !== 'coduosd' &&
+        !p.name.startsWith('kworker') &&
+        !p.name.startsWith('ksoftirqd')
+    )
+  );
   let gpu = $derived(summary?.gpus?.[0]);
+
+  function appActive(to: string) {
+    if (to === '/apps') {
+      return path === '/apps' || (path.startsWith('/apps/') && path !== '/apps/new');
+    }
+    return path === to || path.startsWith(to + '/');
+  }
 
   onMount(() => {
     const es = new EventSource('/api/system/summary/stream', { withCredentials: true });
@@ -134,7 +148,7 @@
           <div>
             <h3><Icon name="cpu" size={16} alt="" /> CPU</h3>
             <div>{summary.cpu_cores} cores{#if summary.cpu_temp_c != null} · {summary.cpu_temp_c.toFixed(0)}°C{/if}</div>
-            <div class="meta">{summary.os}</div>
+            <div class="meta clip">{shortOs(summary.os)}</div>
           </div>
         </button>
         {#if gpu}
@@ -142,7 +156,7 @@
             <div class="gauge" style="--p:{gpu.util_percent ?? 0}"><span>{gpu.util_percent != null ? gpu.util_percent.toFixed(0) + '%' : 'GPU'}</span></div>
             <div>
               <h3>GPU</h3>
-              <div>{gpu.name}</div>
+              <div class="clip">{prettyGpu(gpu.name)}</div>
               <div class="meta">{#if gpu.temp_c != null}{gpu.temp_c.toFixed(0)}°C{/if}{#if gpu.mem_used != null && gpu.mem_total} · {bytes(gpu.mem_used)} / {bytes(gpu.mem_total)}{/if}</div>
             </div>
           </button>
@@ -156,11 +170,11 @@
         </button>
         {#if primaryNet}
           <button class="widget hit" onclick={() => tap('/network')}>
-            <div class="gauge" style="--p:{Math.min(100, (primaryNet.rx_bps + primaryNet.tx_bps) / 1_000_000)}"><span>Net</span></div>
+            <div class="gauge plain"><span>↓↑</span></div>
             <div>
               <h3><Icon name={appIcons.network} size={16} alt="" /> Network</h3>
               <div>↓ {bps(primaryNet.rx_bps)} ↑ {bps(primaryNet.tx_bps)}</div>
-              <div class="meta">{primaryNet.name}{#if primaryNet.ipv4} · {primaryNet.ipv4}{/if}</div>
+              <div class="meta clip">{primaryNet.ipv4 || primaryNet.name}</div>
             </div>
           </button>
         {/if}
@@ -169,74 +183,67 @@
             <div class="gauge" style="--p:{pct(worstDisk.used, worstDisk.total)}"><span>{pct(worstDisk.used, worstDisk.total)}%</span></div>
             <div>
               <h3><Icon name="disk" size={16} alt="" /> Storage</h3>
-              <div>{worstDisk.mount}</div>
+              <div class="clip">{worstDisk.mount === '/' ? 'System disk' : worstDisk.mount}</div>
               <div class="meta">{bytes(worstDisk.used)} / {bytes(worstDisk.total)}</div>
             </div>
           </button>
         {/if}
         {#if topProc}
           <button class="widget hit" onclick={() => tap('/tasks')}>
-            <div class="gauge" style="--p:{Math.min(100, topProc.cpu_percent)}"><span>{topProc.cpu_percent.toFixed(0)}%</span></div>
+            <div class="gauge" style="--p:{Math.min(100, topProc.cpu_percent)}"><span>{Math.min(100, topProc.cpu_percent).toFixed(0)}%</span></div>
             <div>
               <h3>Tasks</h3>
-              <div>{topProc.name}</div>
+              <div class="clip">{topProc.name}</div>
               <div class="meta">{bytes(topProc.mem_bytes)}</div>
             </div>
           </button>
         {/if}
-        <button class="widget hit" onclick={() => tap('/apps')}>
-          <div class="gauge" style="--p:{summary.docker.available ? 100 : 0}"><span>{summary.docker.available ? 'On' : 'Off'}</span></div>
-          <div>
-            <h3><Icon name={appIcons.docker} size={16} alt="" /> Docker</h3>
-            <div class="meta">{summary.docker.version ?? summary.docker.error ?? 'not detected'}</div>
-          </div>
-        </button>
       {/if}
     </aside>
 
     <section class="desk-main">
       {#key $iconRev}
       <div class="desk-apps">
-        <button class="desk-app hit" onclick={() => go('/files')}>
+        <button class="desk-app hit" class:active={appActive('/files')} onclick={() => go('/files')}>
           <Icon name={appIcons.files} size={56} class="tile-img" alt="" />
           <div class="label">Files</div>
         </button>
-        <button class="desk-app hit" onclick={() => go('/apps')}>
+        <button class="desk-app hit" class:active={appActive('/apps')} onclick={() => go('/apps')}>
           <Icon name={appIcons.apps} size={56} class="tile-img" alt="" />
           <div class="label">Apps</div>
         </button>
-        <button class="desk-app hit" onclick={() => go('/storage')}>
+        <button class="desk-app hit" class:active={appActive('/storage')} onclick={() => go('/storage')}>
           <Icon name={appIcons.storage} size={56} class="tile-img" alt="" />
           <div class="label">Storage</div>
         </button>
-        <button class="desk-app hit" onclick={() => go('/tasks')}>
+        <button class="desk-app hit" class:active={appActive('/tasks')} onclick={() => go('/tasks')}>
           <Icon name={appIcons.tasks} size={56} class="tile-img" alt="" />
           <div class="label">Tasks</div>
         </button>
-        <button class="desk-app hit" onclick={() => go('/vpn')}>
+        <button class="desk-app hit" class:active={appActive('/vpn')} onclick={() => go('/vpn')}>
           <Icon name={appIcons.vpn} size={56} class="tile-img" alt="" />
           <div class="label">VPN</div>
         </button>
-        <button class="desk-app hit" onclick={() => go('/proxy')}>
+        <button class="desk-app hit" class:active={appActive('/proxy')} onclick={() => go('/proxy')}>
           <Icon name={appIcons.proxy} size={56} class="tile-img" alt="" />
           <div class="label">Proxy</div>
         </button>
-        <button class="desk-app hit" onclick={() => go('/services')}>
+        <button class="desk-app hit" class:active={appActive('/services')} onclick={() => go('/services')}>
           <Icon name={appIcons.services} size={56} class="tile-img" alt="" />
           <div class="label">Services</div>
         </button>
-        <button class="desk-app hit" onclick={() => go('/settings')}>
+        <button class="desk-app hit" class:active={appActive('/settings')} onclick={() => go('/settings')}>
           <Icon name={appIcons.settings} size={56} class="tile-img" alt="" />
           <div class="label">Settings</div>
         </button>
         {#each apps as app}
-          <button class="desk-app hit" onclick={() => openApp(app)}>
+          <button class="desk-app hit" class:active={appActive('/apps/' + app.id)} onclick={() => openApp(app)}>
             <Icon name={appIcon(app)} size={56} class="tile-img" alt="" />
             <div class="label">{app.name}</div>
             <div class="state"><span class="dot" class:on={app.status.running}></span> {app.status.running ? 'Running' : 'Stopped'}</div>
           </button>
         {/each}
-        <button class="desk-app hit" onclick={() => go('/apps/new')}>
+        <button class="desk-app hit" class:active={path === '/apps/new'} onclick={() => go('/apps/new')}>
           <Icon name={appIcons.install} size={56} class="tile-img" alt="" />
           <div class="label">Install</div>
         </button>

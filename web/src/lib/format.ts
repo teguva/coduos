@@ -32,3 +32,15 @@ export function when(ts?: number | null): string {
   if (!ts) return '—';
   return new Date(ts * 1000).toLocaleString();
 }
+
+export function shortOs(os: string): string {
+  let s = os.replace(/^Linux\s*\(/i, '').replace(/\)$/, '');
+  s = s.replace(/\bGNU\/Linux\s+/i, '');
+  return s.trim() || os;
+}
+
+export function prettyGpu(name: string): string {
+  if (/intel/i.test(name) && /0x[0-9a-f]{4}/i.test(name)) return 'Intel graphics';
+  if (/amd/i.test(name) && /0x[0-9a-f]{4}/i.test(name)) return 'AMD graphics';
+  return name;
+}
