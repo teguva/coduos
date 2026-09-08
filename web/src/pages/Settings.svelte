@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { api, isLight, setTheme } from '../lib/api';
   import Icon from '../components/Icon.svelte';
+  import Confirm from '../components/Confirm.svelte';
 
   type Root = { id: string; label: string; path: string };
   type Unit = { id: string; unit: string; label: string };
@@ -21,6 +22,7 @@
     latest?: string | null;
     html_url?: string | null;
     up_to_date: boolean;
+    can_apply?: boolean;
     error?: string | null;
   };
   type Discovered = { unit: string; state: string };
@@ -39,7 +41,8 @@
   let addingUnit = $state(false);
   let unitQuery = $state('');
   let newUnit = $state({ id: '', label: '', unit: '' });
-  let discovered = $state<Discovered[]>([]);
+  let applying = $state(false);
+  let confirmUpdate = $state(false);
   let open = $state<Record<string, boolean>>({
     appearance: true,
     account: true,
@@ -171,6 +174,40 @@
   function theme(next: 'light' | 'dark') {
     setTheme(next);
     light = isLight();
+  }
+
+  async function waitForRestart() {
+    notice = 'Restarting CoduOS…';
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        const res = await fetch('/api/setup/status', { credentials: 'include' });
+        if (res.ok) {
+          location.reload();
+          return;
+        }
+      } catch {
+        /* still down */
+      }
+    }
+    location.reload();
+  }
+
+  async function applyUpdate() {
+    error = '';
+    notice = '';
+    applying = true;
+    confirmUpdate = false;
+    try {
+      const res = await api<{ ok: boolean; version: string; restarting: boolean }>('/api/update', {
+        method: 'POST'
+      });
+      notice = `Installed ${res.version}. Restarting…`;
+      await waitForRestart();
+    } catch (err: any) {
+      error = err.message;
+      applying = false;
+    }
   }
 </script>
 
@@ -333,7 +370,7 @@
     <Icon name="download" size={20} alt="" />
     <div>
       <h3>Updates</h3>
-      <p>Checks GitHub for a newer CoduOS release.</p>
+      <p>Install the latest CoduOS release from GitHub.</p>
     </div>
   </button>
   {#if open.updates && update}
@@ -348,8 +385,26 @@
       <span class="meta">Current {update.current}{#if update.latest} · latest {update.latest}{/if}</span>
     </div>
     {#if update.error}<div class="err">{update.error}</div>{/if}
-    {#if update.html_url && !update.up_to_date}
-      <a class="btn" href={update.html_url} target="_blank" rel="noreferrer">Open GitHub release</a>
+    {#if !update.up_to_date && !update.error}
+      {#if !settings?.privileged}
+        <div class="banner">Updating from here needs the installed daemon running as root.</div>
+      {:else if update.can_apply === false}
+        <p class="hint">This copy is not the installed service. Use the installer on the NAS, or run CoduOS from /usr/bin/coduosd.</p>
+      {/if}
+      <div class="row">
+        <button
+          class="btn"
+          disabled={!update.can_apply || applying}
+          onclick={() => (confirmUpdate = true)}
+        >
+          {applying ? 'Updating…' : `Update to ${update.latest}`}
+        </button>
+        {#if update.html_url}
+          <a class="btn secondary" href={update.html_url} target="_blank" rel="noreferrer">Release notes</a>
+        {/if}
+      </div>
+    {:else if update.html_url}
+      <a class="btn secondary" href={update.html_url} target="_blank" rel="noreferrer">Open GitHub release</a>
     {/if}
     <p class="hint">github.com/{settings?.github_owner}/{settings?.github_repo}</p>
   {/if}
@@ -372,3 +427,13 @@
     </dl>
   {/if}
 </section>
+
+{#if confirmUpdate && update?.latest}
+  <Confirm
+    title="Install update?"
+    body={`CoduOS ${update.latest} will be downloaded and installed. The dashboard restarts; you stay signed in.`}
+    confirmLabel={`Update to ${update.latest}`}
+    onCancel={() => (confirmUpdate = false)}
+    onConfirm={applyUpdate}
+  />
+{/if}

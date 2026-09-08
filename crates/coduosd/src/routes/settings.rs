@@ -16,7 +16,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/settings", get(get_settings).put(put_settings))
         .route("/settings/password", put(password))
-        .route("/update", get(update))
+        .route("/update", get(update).post(apply_update))
 }
 
 #[derive(Serialize)]
@@ -139,4 +139,28 @@ async fn update(
     let cfg = state.config.read().await;
     let info = github::check(&state.http, &cfg.github_owner, &cfg.github_repo).await?;
     Ok(Json(info))
+}
+
+async fn apply_update(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<github::ApplyResult>, ApiError> {
+    current_user(&state, &jar).await?;
+    let cfg = state.config.read().await;
+    let result = github::apply(
+        &state.http,
+        &cfg.github_owner,
+        &cfg.github_repo,
+        &cfg.www_dir,
+    )
+    .await?;
+    drop(cfg);
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let _ = tokio::process::Command::new("systemctl")
+            .args(["restart", "coduosd.service"])
+            .status()
+            .await;
+    });
+    Ok(Json(result))
 }
