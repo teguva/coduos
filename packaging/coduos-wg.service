@@ -1,0 +1,14 @@
+[Unit]
+Description=CoduOS WireGuard
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/coduos/wireguard/coduos.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/wg-quick up /var/lib/coduos/wireguard/coduos.conf
+ExecStop=/usr/bin/wg-quick down /var/lib/coduos/wireguard/coduos.conf
+
+[Install]
+WantedBy=multi-user.target

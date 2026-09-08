@@ -23,7 +23,9 @@ install -d "${stage}/usr/bin" "${stage}/usr/share/coduos" "${stage}/usr/lib/syst
 install -m 0755 "${root}/target/release/coduosd" "${stage}/usr/bin/coduosd"
 cp -a "${root}/web/dist" "${stage}/usr/share/coduos/www"
 install -m 0644 "${root}/packaging/coduosd.service" "${stage}/usr/lib/systemd/system/coduosd.service"
+install -m 0644 "${root}/packaging/coduos-wg.service" "${stage}/usr/lib/systemd/system/coduos-wg.service"
 install -m 0644 "${root}/packaging/coduos.toml" "${stage}/etc/coduos/coduos.toml"
+install -m 0644 "${root}/packaging/nginx-coduos.conf" "${stage}/usr/share/coduos/nginx-coduos.conf"
 
 mkdir -p "${root}/dist"
 tarball="${root}/dist/linux-${TARGET_ARCH}-coduos-v${version}.tar.gz"

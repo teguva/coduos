@@ -95,3 +95,44 @@ pub async fn journal(spec: &UnitSpec, lines: u32) -> Result<String, ApiError> {
         .map_err(|err| ApiError::BadRequest(format!("journalctl: {err}")))?;
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredUnit {
+    pub unit: String,
+    pub state: String,
+}
+
+pub async fn list_unit_files() -> Result<Vec<DiscoveredUnit>, ApiError> {
+    let out = Command::new("systemctl")
+        .args([
+            "list-unit-files",
+            "--type=service",
+            "--no-pager",
+            "--plain",
+            "--no-legend",
+        ])
+        .output()
+        .await
+        .map_err(|err| ApiError::BadRequest(format!("systemctl: {err}")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut units = Vec::new();
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(unit) = parts.next() else { continue };
+        if !unit.ends_with(".service") || unit.contains('/') {
+            continue;
+        }
+        if validate_unit_name(unit).is_err() {
+            continue;
+        }
+        let state = parts.next().unwrap_or("unknown").to_string();
+        units.push(DiscoveredUnit {
+            unit: unit.to_string(),
+            state,
+        });
+        if units.len() >= 400 {
+            break;
+        }
+    }
+    Ok(units)
+}

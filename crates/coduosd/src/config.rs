@@ -19,6 +19,8 @@ pub struct Config {
     pub file_roots: Vec<FileRoot>,
     #[serde(default)]
     pub units: Vec<UnitSpec>,
+    #[serde(default)]
+    pub storage_mounts: Vec<StorageMount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +31,16 @@ pub struct FileRoot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageMount {
+    pub uuid: String,
+    pub mountpoint: PathBuf,
+    #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnitSpec {
     pub id: String,
     pub unit: String,
@@ -36,7 +48,7 @@ pub struct UnitSpec {
 }
 
 fn default_bind() -> String {
-    "0.0.0.0:80".into()
+    "127.0.0.1:13209".into()
 }
 
 fn default_data_dir() -> PathBuf {
@@ -99,6 +111,7 @@ impl Config {
             github_repo: default_github_repo(),
             file_roots: default_file_roots(),
             units: default_units(),
+            storage_mounts: Vec::new(),
         };
         if !running_as_root() {
             cfg.bind = "127.0.0.1:13209".into();
@@ -125,6 +138,10 @@ impl Config {
 
     pub fn apps_dir(&self) -> PathBuf {
         self.data_dir.join("apps")
+    }
+
+    pub fn icons_dir(&self) -> PathBuf {
+        self.data_dir.join("icons")
     }
 
     pub fn file_root(&self, id: &str) -> Option<&FileRoot> {
@@ -183,6 +200,16 @@ fn default_units() -> Vec<UnitSpec> {
             id: "ssh".into(),
             unit: "ssh.service".into(),
             label: "SSH".into(),
+        },
+        UnitSpec {
+            id: "nginx".into(),
+            unit: "nginx.service".into(),
+            label: "nginx".into(),
+        },
+        UnitSpec {
+            id: "wireguard".into(),
+            unit: "coduos-wg.service".into(),
+            label: "WireGuard".into(),
         },
     ]
 }

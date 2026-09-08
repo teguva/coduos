@@ -1,4 +1,4 @@
-bind = "0.0.0.0:80"
+bind = "127.0.0.1:13209"
 data_dir = "/var/lib/coduos"
 www_dir = "/usr/share/coduos/www"
 github_owner = "teguva"
@@ -18,3 +18,13 @@ label = "Docker"
 id = "ssh"
 unit = "ssh.service"
 label = "SSH"
+
+[[units]]
+id = "nginx"
+unit = "nginx.service"
+label = "nginx"
+
+[[units]]
+id = "wireguard"
+unit = "coduos-wg.service"
+label = "WireGuard"

@@ -7,10 +7,14 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 systemctl disable --now coduosd.service 2>/dev/null || true
+systemctl disable --now coduos-wg.service 2>/dev/null || true
 rm -f /usr/bin/coduosd
 rm -f /usr/lib/systemd/system/coduosd.service
+rm -f /usr/lib/systemd/system/coduos-wg.service
+rm -f /etc/nginx/conf.d/coduos.conf
 rm -rf /usr/share/coduos
 systemctl daemon-reload
+# Docker, nginx, and wireguard-tools packages are left installed.
 
 if [[ "${1:-}" == "--purge" ]]; then
   rm -rf /etc/coduos /var/lib/coduos

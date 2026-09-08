@@ -2,6 +2,7 @@
 Description=CoduOS dashboard
 Documentation=https://github.com/teguva/coduos
 After=network-online.target docker.service
+Before=nginx.service
 Wants=network-online.target
 
 [Service]
@@ -10,6 +11,7 @@ ExecStart=/usr/bin/coduosd --config /etc/coduos/coduos.toml
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20
+# No CAP_NET_ADMIN. WireGuard and nginx are reloaded via allowlisted units.
 
 [Install]
 WantedBy=multi-user.target

@@ -1,11 +1,23 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { api } from '../lib/api';
+  import { appIcons } from '../lib/icons';
+  import Icon from '../components/Icon.svelte';
 
-  let { onDone } = $props<{ onDone: () => void }>();
+  let { onDone, onNeedSetup } = $props<{ onDone: () => void; onNeedSetup: () => void }>();
   let username = $state('');
   let password = $state('');
   let error = $state('');
   let busy = $state(false);
+
+  onMount(async () => {
+    try {
+      const status = await api<{ needed: boolean }>('/api/setup/status');
+      if (status.needed) onNeedSetup();
+    } catch {
+      /* keep login; App.svelte already handled unreachable daemon */
+    }
+  });
 
   async function submit(e: Event) {
     e.preventDefault();
@@ -15,6 +27,10 @@
       await api('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) });
       onDone();
     } catch (err: any) {
+      if (err.code === 'setup_required') {
+        onNeedSetup();
+        return;
+      }
       error = err.message === 'unauthorized' ? 'Wrong username or password' : err.message;
     } finally {
       busy = false;
@@ -24,8 +40,9 @@
 
 <div class="auth-wrap">
   <form class="auth-card" onsubmit={submit}>
+    <div class="auth-logo"><Icon name={appIcons.computer} size={48} alt="" /></div>
     <h1>CoduOS</h1>
-    <p>Sign in to manage this server.</p>
+    <p>Sign in with the admin account created on first start.</p>
     <label class="field"><span>Username</span><input bind:value={username} autocomplete="username" required /></label>
     <label class="field"><span>Password</span><input type="password" bind:value={password} autocomplete="current-password" required /></label>
     {#if error}<div class="err">{error}</div>{/if}

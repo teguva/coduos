@@ -29,6 +29,8 @@ struct SettingsOut {
     file_roots: Vec<FileRoot>,
     units: Vec<UnitSpec>,
     version: &'static str,
+    hostname: String,
+    privileged: bool,
 }
 
 async fn get_settings(
@@ -37,7 +39,11 @@ async fn get_settings(
 ) -> Result<Json<SettingsOut>, ApiError> {
     current_user(&state, &jar).await?;
     let cfg = state.config.read().await;
-    Ok(Json(SettingsOut {
+    Ok(Json(settings_out(&cfg)))
+}
+
+fn settings_out(cfg: &crate::config::Config) -> SettingsOut {
+    SettingsOut {
         bind: cfg.bind.clone(),
         data_dir: cfg.data_dir.display().to_string(),
         www_dir: cfg.www_dir.display().to_string(),
@@ -46,7 +52,12 @@ async fn get_settings(
         file_roots: cfg.file_roots.clone(),
         units: cfg.units.clone(),
         version: env!("CARGO_PKG_VERSION"),
-    }))
+        hostname: hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "coduos".into()),
+        privileged: crate::config::running_as_root(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -96,16 +107,7 @@ async fn put_settings(
     next.save(&state.config_path)
         .map_err(|e| ApiError::BadRequest(format!("could not write config: {e}")))?;
     *cfg = next;
-    Ok(Json(SettingsOut {
-        bind: cfg.bind.clone(),
-        data_dir: cfg.data_dir.display().to_string(),
-        www_dir: cfg.www_dir.display().to_string(),
-        github_owner: cfg.github_owner.clone(),
-        github_repo: cfg.github_repo.clone(),
-        file_roots: cfg.file_roots.clone(),
-        units: cfg.units.clone(),
-        version: env!("CARGO_PKG_VERSION"),
-    }))
+    Ok(Json(settings_out(&cfg)))
 }
 
 #[derive(Deserialize)]

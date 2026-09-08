@@ -1,9 +1,13 @@
-use std::path::PathBuf;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use sysinfo::{Disks, Networks, System};
-use tokio::sync::watch;
+use sysinfo::{
+    Components, Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System, ThreadKind,
+    UpdateKind,
+};
+
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemSummary {
@@ -13,14 +17,19 @@ pub struct SystemSummary {
     pub uptime_secs: u64,
     pub cpu_percent: f32,
     pub cpu_cores: usize,
+    pub cpu_temp_c: Option<f32>,
     pub mem_used: u64,
     pub mem_total: u64,
     pub swap_used: u64,
     pub swap_total: u64,
     pub disks: Vec<DiskInfo>,
     pub networks: Vec<NetInfo>,
+    pub sensors: Vec<SensorInfo>,
+    pub gpus: Vec<GpuInfo>,
+    pub processes: Vec<ProcInfo>,
     pub docker: DockerInfo,
     pub version: String,
+    pub privileged: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +46,36 @@ pub struct NetInfo {
     pub name: String,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
+    pub rx_bps: u64,
+    pub tx_bps: u64,
+    pub ipv4: Option<String>,
+    pub operstate: String,
+    pub speed_mbps: Option<u32>,
+    pub virtual_iface: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SensorInfo {
+    pub label: String,
+    pub temp_c: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GpuInfo {
+    pub name: String,
+    pub vendor: String,
+    pub util_percent: Option<f32>,
+    pub mem_used: Option<u64>,
+    pub mem_total: Option<u64>,
+    pub temp_c: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcInfo {
+    pub pid: u32,
+    pub name: String,
+    pub cpu_percent: f32,
+    pub mem_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,27 +97,44 @@ impl Default for SystemSummary {
             uptime_secs: System::uptime(),
             cpu_percent: 0.0,
             cpu_cores: 0,
+            cpu_temp_c: None,
             mem_used: 0,
             mem_total: 0,
             swap_used: 0,
             swap_total: 0,
             disks: vec![],
             networks: vec![],
+            sensors: vec![],
+            gpus: vec![],
+            processes: vec![],
             docker: DockerInfo {
                 available: false,
                 version: None,
                 error: None,
             },
             version: env!("CARGO_PKG_VERSION").into(),
+            privileged: crate::config::running_as_root(),
         }
     }
 }
 
-pub fn spawn_collector(tx: watch::Sender<SystemSummary>) {
+struct Collector {
+    sys: System,
+    nets: Networks,
+    prev_net: HashMap<String, (u64, u64)>,
+    prev_at: Instant,
+}
+
+pub fn spawn_collector(tx: tokio::sync::watch::Sender<SystemSummary>) {
     tokio::task::spawn_blocking(move || {
-        let mut sys = System::new();
+        let mut col = Collector {
+            sys: System::new(),
+            nets: Networks::new_with_refreshed_list(),
+            prev_net: HashMap::new(),
+            prev_at: Instant::now(),
+        };
         loop {
-            let summary = collect(&mut sys);
+            let summary = col.collect();
             if tx.send(summary).is_err() {
                 break;
             }
@@ -87,70 +143,431 @@ pub fn spawn_collector(tx: watch::Sender<SystemSummary>) {
     });
 }
 
-fn collect(sys: &mut System) -> SystemSummary {
-    sys.refresh_memory();
-    sys.refresh_cpu_all();
-    std::thread::sleep(Duration::from_millis(200));
-    sys.refresh_cpu_all();
-    sys.refresh_memory();
+impl Collector {
+    fn collect(&mut self) -> SystemSummary {
+        self.sys.refresh_memory();
+        self.sys.refresh_cpu_all();
+        let kind = ProcessRefreshKind::nothing()
+            .with_cpu()
+            .with_memory()
+            .with_cmd(UpdateKind::OnlyIfNotSet)
+            .with_exe(UpdateKind::OnlyIfNotSet);
+        self.sys
+            .refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+        std::thread::sleep(Duration::from_millis(200));
+        self.sys.refresh_cpu_all();
+        self.sys.refresh_memory();
+        self.sys
+            .refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
 
-    let disks = Disks::new_with_refreshed_list();
-    let nets = Networks::new_with_refreshed_list();
+        let disks = Disks::new_with_refreshed_list();
+        self.nets.refresh(true);
 
-    let disk_infos = disks
-        .iter()
-        .filter(|d| {
-            let mount = d.mount_point();
-            mount == PathBuf::from("/")
-                || mount.starts_with("/DATA")
-                || mount.starts_with("/mnt")
-                || mount.starts_with("/media")
-                || mount.starts_with("/home")
-        })
-        .map(|d| {
-            let total = d.total_space();
-            let avail = d.available_space();
-            DiskInfo {
-                name: d.name().to_string_lossy().into_owned(),
-                mount: d.mount_point().display().to_string(),
-                fs: d.file_system().to_string_lossy().into_owned(),
-                total,
-                used: total.saturating_sub(avail),
-            }
-        })
-        .collect();
+        let now = Instant::now();
+        let dt = now.duration_since(self.prev_at).as_secs_f64().max(0.2);
+        let addrs = ipv4_map();
 
-    let net_infos = nets
-        .iter()
-        .filter(|(name, _)| {
+        let mut net_infos = Vec::new();
+        for (name, data) in self.nets.iter() {
             let n = name.as_str();
-            !n.starts_with("lo") && !n.starts_with("docker") && !n.starts_with("br-") && !n.starts_with("veth")
-        })
-        .map(|(name, data)| NetInfo {
-            name: name.clone(),
-            rx_bytes: data.total_received(),
-            tx_bytes: data.total_transmitted(),
+            if n == "lo" {
+                continue;
+            }
+            let rx = data.total_received();
+            let tx = data.total_transmitted();
+            let (rx_bps, tx_bps) = if let Some((prx, ptx)) = self.prev_net.get(n) {
+                (
+                    ((rx.saturating_sub(*prx) as f64) / dt) as u64,
+                    ((tx.saturating_sub(*ptx) as f64) / dt) as u64,
+                )
+            } else {
+                (0, 0)
+            };
+            self.prev_net.insert(n.to_string(), (rx, tx));
+            net_infos.push(NetInfo {
+                name: n.to_string(),
+                rx_bytes: rx,
+                tx_bytes: tx,
+                rx_bps,
+                tx_bps,
+                ipv4: addrs.get(n).cloned(),
+                operstate: sysfs_trim(&format!("/sys/class/net/{n}/operstate")),
+                speed_mbps: sysfs_trim(&format!("/sys/class/net/{n}/speed"))
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|v| *v > 0)
+                    .map(|v| v as u32),
+                virtual_iface: is_virtual(n),
+            });
+        }
+        self.prev_at = now;
+
+        let disk_infos = disks
+            .iter()
+            .filter(|d| interesting_mount(d.mount_point()))
+            .map(|d| {
+                let total = d.total_space();
+                let avail = d.available_space();
+                DiskInfo {
+                    name: d.name().to_string_lossy().into_owned(),
+                    mount: d.mount_point().display().to_string(),
+                    fs: d.file_system().to_string_lossy().into_owned(),
+                    total,
+                    used: total.saturating_sub(avail),
+                }
+            })
+            .collect();
+
+        let mut components = Components::new_with_refreshed_list();
+        components.refresh(true);
+        let mut sensors = Vec::new();
+        for c in components.iter() {
+            if let Some(t) = c.temperature() {
+                if t.is_finite() && t > 0.0 && t < 150.0 {
+                    sensors.push(SensorInfo {
+                        label: c.label().to_string(),
+                        temp_c: t,
+                    });
+                }
+            }
+        }
+        let cpu_temp_c = pick_cpu_temp(&sensors);
+        let gpus = collect_gpus(&sensors);
+
+        let mut processes: Vec<ProcInfo> = self
+            .sys
+            .processes()
+            .iter()
+            .filter(|(_, p)| p.thread_kind() != Some(ThreadKind::Kernel))
+            .map(|(pid, p)| ProcInfo {
+                pid: pid.as_u32(),
+                name: p.name().to_string_lossy().into_owned(),
+                cpu_percent: p.cpu_usage(),
+                mem_bytes: p.memory(),
+            })
+            .collect();
+        processes.sort_by(|a, b| {
+            b.cpu_percent
+                .partial_cmp(&a.cpu_percent)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.mem_bytes.cmp(&a.mem_bytes))
+        });
+        processes.truncate(8);
+
+        SystemSummary {
+            hostname: System::host_name().unwrap_or_else(|| "coduos".into()),
+            os: System::long_os_version().unwrap_or_else(|| "Linux".into()),
+            kernel: System::kernel_version().unwrap_or_default(),
+            uptime_secs: System::uptime(),
+            cpu_percent: self.sys.global_cpu_usage(),
+            cpu_cores: self.sys.cpus().len(),
+            cpu_temp_c,
+            mem_used: self.sys.used_memory(),
+            mem_total: self.sys.total_memory(),
+            swap_used: self.sys.used_swap(),
+            swap_total: self.sys.total_swap(),
+            disks: disk_infos,
+            networks: net_infos,
+            sensors,
+            gpus,
+            processes,
+            docker: docker_info(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            privileged: crate::config::running_as_root(),
+        }
+    }
+}
+
+pub fn list_processes() -> Vec<ProcInfo> {
+    let mut sys = System::new();
+    let kind = ProcessRefreshKind::nothing()
+        .with_cpu()
+        .with_memory()
+        .with_exe(UpdateKind::OnlyIfNotSet);
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+    std::thread::sleep(Duration::from_millis(200));
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+    let mut processes: Vec<ProcInfo> = sys
+        .processes()
+        .iter()
+        .filter(|(_, p)| p.thread_kind() != Some(ThreadKind::Kernel))
+        .map(|(pid, p)| ProcInfo {
+            pid: pid.as_u32(),
+            name: p.name().to_string_lossy().into_owned(),
+            cpu_percent: p.cpu_usage(),
+            mem_bytes: p.memory(),
         })
         .collect();
+    processes.sort_by(|a, b| {
+        b.cpu_percent
+            .partial_cmp(&a.cpu_percent)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.mem_bytes.cmp(&a.mem_bytes))
+    });
+    processes.truncate(250);
+    processes
+}
 
-    let docker = docker_info();
-
-    SystemSummary {
-        hostname: System::host_name().unwrap_or_else(|| "coduos".into()),
-        os: System::long_os_version().unwrap_or_else(|| "Linux".into()),
-        kernel: System::kernel_version().unwrap_or_default(),
-        uptime_secs: System::uptime(),
-        cpu_percent: sys.global_cpu_usage(),
-        cpu_cores: sys.cpus().len(),
-        mem_used: sys.used_memory(),
-        mem_total: sys.total_memory(),
-        swap_used: sys.used_swap(),
-        swap_total: sys.total_swap(),
-        disks: disk_infos,
-        networks: net_infos,
-        docker,
-        version: env!("CARGO_PKG_VERSION").into(),
+pub fn signal_process(pid: u32) -> Result<(), crate::error::ApiError> {
+    use crate::error::ApiError;
+    if pid <= 1 {
+        return Err(ApiError::Forbidden);
     }
+    if pid == std::process::id() {
+        return Err(ApiError::Forbidden);
+    }
+    let mut sys = System::new();
+    let kind = ProcessRefreshKind::nothing()
+        .with_exe(UpdateKind::OnlyIfNotSet)
+        .with_cmd(UpdateKind::OnlyIfNotSet);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+        true,
+        kind,
+    );
+    let Some(proc) = sys.process(sysinfo::Pid::from_u32(pid)) else {
+        return Err(ApiError::NotFound);
+    };
+    if proc.thread_kind() == Some(ThreadKind::Kernel) {
+        return Err(ApiError::Forbidden);
+    }
+    let name = proc.name().to_string_lossy();
+    if name == "coduosd" {
+        return Err(ApiError::Forbidden);
+    }
+    if proc
+        .exe()
+        .map(|p| p.file_name().is_some_and(|n| n == "coduosd"))
+        .unwrap_or(false)
+    {
+        return Err(ApiError::Forbidden);
+    }
+    #[cfg(unix)]
+    {
+        let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        if rc != 0 {
+            return Err(ApiError::BadRequest(format!(
+                "could not signal pid {pid}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        Err(ApiError::BadRequest("signals are unix-only".into()))
+    }
+}
+
+pub fn docker_stats() -> Vec<DockerStat> {
+    let out = std::process::Command::new("docker")
+        .args([
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{json .}}",
+        ])
+        .output();
+    let Ok(out) = out else {
+        return vec![];
+    };
+    if !out.status.success() {
+        return vec![];
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<DockerStatRaw>(line.trim()).ok())
+        .map(|raw| DockerStat {
+            name: raw.name.unwrap_or_default(),
+            cpu_percent: parse_pct(&raw.cpu_perc.unwrap_or_default()),
+            mem_usage: raw.mem_usage.unwrap_or_default(),
+            pids: raw.pids.unwrap_or_default(),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DockerStat {
+    pub name: String,
+    pub cpu_percent: f32,
+    pub mem_usage: String,
+    pub pids: String,
+}
+
+#[derive(Deserialize)]
+struct DockerStatRaw {
+    #[serde(rename = "Name")]
+    name: Option<String>,
+    #[serde(rename = "CPUPerc")]
+    cpu_perc: Option<String>,
+    #[serde(rename = "MemUsage")]
+    mem_usage: Option<String>,
+    #[serde(rename = "PIDs")]
+    pids: Option<String>,
+}
+
+use serde::Deserialize;
+
+fn parse_pct(s: &str) -> f32 {
+    s.trim().trim_end_matches('%').parse().unwrap_or(0.0)
+}
+
+fn interesting_mount(mount: &Path) -> bool {
+    mount == PathBuf::from("/")
+        || mount.starts_with("/DATA")
+        || mount.starts_with("/mnt")
+        || mount.starts_with("/media")
+        || mount.starts_with("/home")
+}
+
+fn is_virtual(name: &str) -> bool {
+    name.starts_with("docker")
+        || name.starts_with("br-")
+        || name.starts_with("veth")
+        || name.starts_with("virbr")
+        || name.starts_with("cni")
+        || name.starts_with("flannel")
+}
+
+fn sysfs_trim(path: &str) -> String {
+    std::fs::read_to_string(path)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn ipv4_map() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(out) = std::process::Command::new("ip")
+        .args(["-j", "-4", "addr"])
+        .output()
+    else {
+        return map;
+    };
+    if !out.status.success() {
+        return map;
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return map;
+    };
+    let Some(arr) = v.as_array() else {
+        return map;
+    };
+    for iface in arr {
+        let Some(name) = iface.get("ifname").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        if let Some(infos) = iface.get("addr_info").and_then(|x| x.as_array()) {
+            for info in infos {
+                if info.get("family").and_then(|x| x.as_str()) == Some("inet") {
+                    if let Some(local) = info.get("local").and_then(|x| x.as_str()) {
+                        map.insert(name.to_string(), local.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+fn pick_cpu_temp(sensors: &[SensorInfo]) -> Option<f32> {
+    let prefer = ["tctl", "package", "coretemp", "k10temp", "zenpower", "cpu"];
+    for key in prefer {
+        if let Some(s) = sensors.iter().find(|s| s.label.to_ascii_lowercase().contains(key)) {
+            return Some(s.temp_c);
+        }
+    }
+    sensors.first().map(|s| s.temp_c)
+}
+
+fn collect_gpus(sensors: &[SensorInfo]) -> Vec<GpuInfo> {
+    let mut gpus = nvidia_gpus();
+    gpus.extend(sysfs_gpus(sensors));
+    gpus
+}
+
+fn nvidia_gpus() -> Vec<GpuInfo> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ])
+        .output();
+    let Ok(out) = out else {
+        return vec![];
+    };
+    if !out.status.success() {
+        return vec![];
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split(',').map(str::trim).collect();
+            if parts.len() < 5 {
+                return None;
+            }
+            Some(GpuInfo {
+                name: parts[0].to_string(),
+                vendor: "nvidia".into(),
+                util_percent: parts[1].parse().ok(),
+                mem_used: parts[2]
+                    .parse::<f64>()
+                    .ok()
+                    .map(|mib| (mib * 1024.0 * 1024.0) as u64),
+                mem_total: parts[3]
+                    .parse::<f64>()
+                    .ok()
+                    .map(|mib| (mib * 1024.0 * 1024.0) as u64),
+                temp_c: parts[4].parse().ok(),
+            })
+        })
+        .collect()
+}
+
+fn sysfs_gpus(sensors: &[SensorInfo]) -> Vec<GpuInfo> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return out;
+    };
+    for ent in entries.flatten() {
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+        let dev = ent.path().join("device");
+        let vendor = sysfs_trim(&dev.join("vendor").display().to_string());
+        let vendor = match vendor.to_ascii_lowercase().as_str() {
+            "0x1002" => "amd",
+            "0x8086" => "intel",
+            "0x10de" => continue, // nvidia-smi path
+            _ => continue,
+        };
+        let util = sysfs_trim(&dev.join("gpu_busy_percent").display().to_string())
+            .parse::<f32>()
+            .ok();
+        let label_key = if vendor == "amd" { "amdgpu" } else { "i915" };
+        let temp = sensors
+            .iter()
+            .find(|s| s.label.to_ascii_lowercase().contains(label_key))
+            .map(|s| s.temp_c);
+        if util.is_none() && temp.is_none() && vendor == "intel" {
+            // Intel without busy % still shown if we have a PCI device name
+        }
+        let pretty = std::fs::read_to_string(dev.join("device"))
+            .ok()
+            .map(|s| format!("{vendor} gpu {}", s.trim()))
+            .unwrap_or_else(|| format!("{vendor} gpu"));
+        out.push(GpuInfo {
+            name: pretty,
+            vendor: vendor.into(),
+            util_percent: util,
+            mem_used: None,
+            mem_total: None,
+            temp_c: temp,
+        });
+    }
+    out
 }
 
 fn docker_info() -> DockerInfo {
@@ -176,9 +593,21 @@ fn docker_info() -> DockerInfo {
     }
 }
 
-pub fn channel() -> (watch::Sender<SystemSummary>, watch::Receiver<SystemSummary>) {
-    watch::channel(SystemSummary::default())
+pub fn channel() -> (tokio::sync::watch::Sender<SystemSummary>, tokio::sync::watch::Receiver<SystemSummary>) {
+    tokio::sync::watch::channel(SystemSummary::default())
 }
 
-pub type SummaryTx = watch::Sender<SystemSummary>;
-pub type SummaryRx = watch::Receiver<SystemSummary>;
+pub type SummaryTx = tokio::sync::watch::Sender<SystemSummary>;
+pub type SummaryRx = tokio::sync::watch::Receiver<SystemSummary>;
+
+pub fn disk_usage_by_mount(mount: &str) -> Option<(u64, u64)> {
+    let disks = Disks::new_with_refreshed_list();
+    disks.iter().find_map(|d| {
+        if d.mount_point().display().to_string() == mount {
+            let total = d.total_space();
+            Some((total.saturating_sub(d.available_space()), total))
+        } else {
+            None
+        }
+    })
+}

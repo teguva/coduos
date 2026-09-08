@@ -1,15 +1,16 @@
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
+use serde::Serialize;
 use std::convert::Infallible;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::stats::SystemSummary;
+use crate::stats::{self, DockerStat, ProcInfo, SystemSummary};
 
 use super::current_user;
 
@@ -17,6 +18,43 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/system/summary", get(summary))
         .route("/system/summary/stream", get(stream))
+        .route("/system/tasks", get(tasks))
+        .route("/system/process/{pid}/signal", post(signal))
+}
+
+#[derive(Serialize)]
+struct TasksOut {
+    processes: Vec<ProcInfo>,
+    containers: Vec<DockerStat>,
+}
+
+async fn tasks(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<TasksOut>, ApiError> {
+    current_user(&state, &jar).await?;
+    let processes = tokio::task::spawn_blocking(stats::list_processes)
+        .await
+        .map_err(ApiError::internal)?;
+    let containers = tokio::task::spawn_blocking(stats::docker_stats)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(TasksOut {
+        processes,
+        containers,
+    }))
+}
+
+async fn signal(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(pid): Path<u32>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    current_user(&state, &jar).await?;
+    tokio::task::spawn_blocking(move || stats::signal_process(pid))
+        .await
+        .map_err(ApiError::internal)??;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 async fn summary(

@@ -9,9 +9,13 @@ use crate::state::AppState;
 mod apps;
 mod auth_routes;
 mod files;
+mod icons;
+mod proxy;
 mod settings;
+mod storage;
 mod system;
 mod units;
+mod vpn;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -19,8 +23,12 @@ pub fn router() -> Router<AppState> {
         .merge(system::router())
         .merge(apps::router())
         .merge(files::router())
+        .merge(icons::router())
         .merge(units::router())
         .merge(settings::router())
+        .merge(storage::router())
+        .merge(vpn::router())
+        .merge(proxy::router())
 }
 
 pub async fn current_user(state: &AppState, jar: &CookieJar) -> Result<UserRow, ApiError> {

@@ -4,17 +4,24 @@ Lightweight local server dashboard: one Rust daemon (`coduosd`) and a Svelte UI.
 
 Not a CasaOS/ZimaOS fork. No IceWhale services, no app-store ZIP, no message bus.
 
-## Install (Debian / Ubuntu)
+## Install
 
-Needs `curl` and `tar`. Docker is required for apps.
+Needs a supported package manager (`apt`, `pacman`, `dnf`, or `apk`). The installer asks **yes/no** for Docker (Apps), nginx (ports 80/443 and reverse proxy), and WireGuard (VPN), then installs those packages and enables the matching units.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/install.sh | sudo bash
 ```
 
-Open `http://<host>/`, create the admin account, then install apps from Compose YAML.
+Unattended:
 
-Update: run the same installer again (keeps `/etc/coduos/coduos.toml` and `/var/lib/coduos`).
+```sh
+sudo CODUOS_DOCKER=yes CODUOS_NGINX=yes CODUOS_WIREGUARD=no bash -c \
+  'curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/install.sh | bash'
+```
+
+Open `http://<host>/` if nginx was enabled, otherwise `http://<host>:13209/`. Create the admin account, then install apps from Compose YAML.
+
+Update: run the same installer again (keeps `/etc/coduos/coduos.toml` and `/var/lib/coduos`). You will be asked about services again; saying no does not remove packages already installed.
 
 Uninstall:
 
@@ -22,6 +29,8 @@ Uninstall:
 curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/uninstall.sh | sudo bash
 # sudo bash -s -- --purge   # also delete config and data
 ```
+
+Uninstall removes CoduOS files and our nginx snippet. It does **not** uninstall Docker, nginx, or WireGuard.
 
 ## Develop
 

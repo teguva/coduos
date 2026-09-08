@@ -13,8 +13,17 @@ use super::current_user;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/units", get(list))
+        .route("/units/discover", get(discover))
         .route("/units/{id}/{action}", post(act))
         .route("/units/{id}/journal", get(journal))
+}
+
+async fn discover(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<systemd::DiscoveredUnit>>, ApiError> {
+    current_user(&state, &jar).await?;
+    Ok(Json(systemd::list_unit_files().await?))
 }
 
 async fn list(

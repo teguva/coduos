@@ -19,7 +19,16 @@ export function uptime(secs: number): string {
   return `${m}m`;
 }
 
+export function bps(n: number): string {
+  return `${bytes(n)}/s`;
+}
+
 export function pct(used: number, total: number): number {
   if (!total) return 0;
   return Math.min(100, Math.round((used / total) * 1000) / 10);
+}
+
+export function when(ts?: number | null): string {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleString();
 }

@@ -25,10 +25,13 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
+export function setTheme(theme: 'light' | 'dark') {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem('coduos-theme', theme);
+}
+
 export function toggleTheme() {
-  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-  document.documentElement.dataset.theme = next;
-  localStorage.setItem('coduos-theme', next);
+  setTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
 }
 
 export function isLight() {
