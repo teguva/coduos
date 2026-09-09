@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount, type Snippet } from 'svelte';
+  import Icon from './Icon.svelte';
   import UiIcon from './UiIcon.svelte';
 
   let {
     title,
     icon,
+    fileIcon = false,
     onClose,
     size = 'narrow',
     flush = false,
@@ -13,6 +15,8 @@
   } = $props<{
     title: string;
     icon?: string;
+    /** Reversal SVG from /icons/{icon}.svg instead of a Material chrome glyph. */
+    fileIcon?: boolean;
     onClose: () => void;
     size?: 'narrow' | 'wide' | 'sheet' | 'xl';
     flush?: boolean;
@@ -42,7 +46,13 @@
 >
   <div class="os-card {size}" class:sheet role="dialog" aria-label={title}>
     <header class="os-head">
-      {#if icon}<UiIcon name={icon} size={22} />{/if}
+      {#if icon}
+        {#if fileIcon}
+          <Icon name={icon} size={22} class="os-head-icon" />
+        {:else}
+          <UiIcon name={icon} size={22} />
+        {/if}
+      {/if}
       <h1>{title}</h1>
       {#if actions}
         <div class="os-actions">

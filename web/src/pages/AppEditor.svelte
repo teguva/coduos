@@ -1,7 +1,17 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
-  import { addService, exampleStack, slug, stackToYaml, yamlToStack, type StackForm } from '../lib/compose';
+  import {
+    addService,
+    exampleStack,
+    interpolationsFromStack,
+    mergeEnv,
+    slug,
+    stackEnvCount,
+    stackToYaml,
+    yamlToStack,
+    type StackForm
+  } from '../lib/compose';
   import AppWindow from '../components/AppWindow.svelte';
   import ComposeEditor from '../components/ComposeEditor.svelte';
   import ComposeEnv from '../components/ComposeEnv.svelte';
@@ -22,7 +32,7 @@
   let statusError = $state('');
 
   const extras = $derived(Object.keys(stack.extraDoc).sort());
-  const envTotal = $derived(stack.services.reduce((n, s) => n + s.env.filter((e) => e.key.trim()).length, 0));
+  const envTotal = $derived(stackEnvCount(stack));
   const svc = $derived(stack.services[tab]);
 
   function svcMeta(s: StackForm['services'][number]) {
@@ -43,6 +53,7 @@
   }
 
   function syncYaml() {
+    stack.dotEnv = mergeEnv(interpolationsFromStack(stack), stack.dotEnv);
     yaml = stackToYaml(stack);
   }
   function syncForm() {
@@ -70,11 +81,6 @@
     stack = { ...stack, services: stack.services.filter((_, n) => n !== i) };
     if (tab >= stack.services.length) tab = stack.services.length - 1;
     else if (tab > i) tab -= 1;
-  }
-
-  function openService(i: number) {
-    tab = i;
-    pane = 'services';
   }
 
   onMount(async () => {
@@ -275,7 +281,7 @@
         </div>
       </div>
     {:else}
-      <ComposeEnv bind:stack onOpenService={openService} />
+      <ComposeEnv bind:stack />
     {/if}
   {:else}
     <label class="field"><span>compose.yml</span><textarea class="yaml-editor" bind:value={yaml} required></textarea></label>

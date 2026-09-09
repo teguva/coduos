@@ -89,7 +89,7 @@
     { id: 'files', name: 'Files', icon: appIcons.files, to: '/files' },
     { id: 'apps', name: 'Apps', icon: appIcons.apps, to: '/apps' },
     { id: 'settings', name: 'Settings', icon: appIcons.settings, to: '/settings' },
-    { id: 'tasks', name: 'Tasks', icon: appIcons.tasks, to: '/tasks' }
+    { id: 'services', name: 'Services', icon: appIcons.services, to: '/services' }
   ];
 
   let q = $derived(query.trim().toLowerCase());
@@ -252,7 +252,7 @@
   <div class="desk">
     <aside class="widget-col">
       {#if summary}
-        <button class="widget hit" onclick={() => tap('/tasks')}>
+        <button class="widget hit" onclick={() => tap('/services')}>
           <div class="gauge {loadTone(summary.cpu_percent)}" style="--p:{summary.cpu_percent}">
             <span>{summary.cpu_percent.toFixed(0)}%</span>
           </div>
@@ -271,7 +271,7 @@
           </div>
         </button>
         {#if gpu}
-          <button class="widget hit" onclick={() => tap('/tasks')}>
+          <button class="widget hit" onclick={() => tap('/services')}>
             <div class="gauge {loadTone(gpu.util_percent ?? 0)}" style="--p:{gpu.util_percent ?? 0}">
               <span>{gpu.util_percent != null ? gpu.util_percent.toFixed(0) + '%' : '—'}</span>
             </div>
@@ -288,7 +288,7 @@
             </div>
           </button>
         {/if}
-        <button class="widget hit" onclick={() => tap('/tasks')}>
+        <button class="widget hit" onclick={() => tap('/services')}>
           <div class="gauge {loadTone(pct(summary.mem_used, summary.mem_total))}" style="--p:{pct(summary.mem_used, summary.mem_total)}">
             <span>{pct(summary.mem_used, summary.mem_total)}%</span>
           </div>
@@ -368,9 +368,9 @@
           </button>
         {/if}
         {#if topProc}
-          <button class="widget hit" onclick={() => tap('/tasks')}>
+          <button class="widget hit" onclick={() => tap('/services')}>
             <div>
-              <h3><UiIcon name="view_list" size={14} /> Tasks</h3>
+              <h3><Icon name={appIcons.services} size={16} /> Services</h3>
               <div class="clip headline">{topProc.name}</div>
               <div class="meta">{topProc.cpu_percent.toFixed(0)}% CPU · {bytes(topProc.mem_bytes)}</div>
             </div>

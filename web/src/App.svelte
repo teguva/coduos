@@ -78,13 +78,13 @@
     if (path === '/apps/new') return { name: 'new' };
     if (path === '/apps') return { name: 'apps' };
     if (path === '/files') return { name: 'files' };
-    if (path === '/tasks') return { name: 'tasks' };
+    if (path === '/services' || path === '/tasks') return { name: 'services' };
     if (path === '/storage' || path === '/settings/storage') return { name: 'settings', pane: 'storage' };
     if (path === '/network' || path === '/settings/network') return { name: 'settings', pane: 'network' };
     if (path === '/vpn' || path === '/settings/vpn') return { name: 'settings', pane: 'vpn' };
     if (path === '/ddns' || path === '/settings/ddns') return { name: 'settings', pane: 'ddns' };
     if (path === '/proxy' || path === '/settings/proxy') return { name: 'settings', pane: 'proxy' };
-    if (path === '/services' || path === '/settings/services') return { name: 'settings', pane: 'services' };
+    if (path === '/settings/services') return { name: 'settings', pane: 'services' };
     if (path === '/settings' || path === '/settings/general') return { name: 'settings', pane: 'general' };
     if (path.startsWith('/settings/')) {
       return { name: 'settings', pane: decodeURIComponent(path.slice('/settings/'.length)) || 'general' };
@@ -130,7 +130,7 @@
     <AppEditor {go} id={page.id} onClose={() => go('/')} />
   {:else if page.name === 'settings'}
     <Settings pane={page.pane} {go} prefill={proxyPrefill} onClose={() => go('/')} />
-  {:else if page.name === 'tasks'}
+  {:else if page.name === 'services'}
     <Tasks onClose={() => go('/')} />
   {/if}
 {/if}

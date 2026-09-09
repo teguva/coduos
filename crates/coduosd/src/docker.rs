@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -29,7 +31,105 @@ pub fn write_compose(apps_dir: &Path, id: &str, yaml: &str) -> Result<PathBuf, A
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("compose.yml");
     std::fs::write(&path, yaml)?;
+    write_dotenv(&dir, yaml)?;
     Ok(path)
+}
+
+fn write_dotenv(dir: &Path, yaml: &str) -> Result<(), ApiError> {
+    let mut env = BTreeMap::new();
+    collect_interpolations(yaml, &mut env);
+    if let Ok(parsed) = serde_yaml::from_str::<serde_yaml::Value>(yaml) {
+        if let Some(map) = parsed
+            .get("x-coduos")
+            .and_then(|v| v.get("env"))
+            .and_then(|v| v.as_mapping())
+        {
+            for (k, v) in map {
+                let Some(key) = k.as_str() else { continue };
+                if let Some(val) = yaml_scalar(v) {
+                    env.insert(key.to_string(), val);
+                }
+            }
+        }
+    }
+    let path = dir.join(".env");
+    if env.is_empty() {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+        return Ok(());
+    }
+    let mut body = String::new();
+    for (key, value) in &env {
+        body.push_str(&dotenv_line(key, value));
+    }
+    std::fs::write(&path, body)?;
+    let mut perms = std::fs::metadata(&path)?.permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(&path, perms)?;
+    Ok(())
+}
+
+fn collect_interpolations(yaml: &str, env: &mut BTreeMap<String, String>) {
+    let bytes = yaml.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            let start = i + 2;
+            if let Some(rel) = yaml[start..].find('}') {
+                let inner = &yaml[start..start + rel];
+                if let Some((key, def)) = split_interp(inner) {
+                    env.entry(key.to_string()).or_insert_with(|| def.to_string());
+                }
+                i = start + rel + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+fn split_interp(inner: &str) -> Option<(&str, &str)> {
+    let (key, def) = inner
+        .split_once(":-")
+        .map(|(k, d)| (k, d))
+        .unwrap_or((inner, ""));
+    if key.is_empty() {
+        return None;
+    }
+    let mut chars = key.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !chars.all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some((key, def))
+}
+
+fn yaml_scalar(v: &serde_yaml::Value) -> Option<String> {
+    match v {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        serde_yaml::Value::Null => Some(String::new()),
+        _ => None,
+    }
+}
+
+fn dotenv_line(key: &str, value: &str) -> String {
+    if value.is_empty() {
+        return format!("{key}=\n");
+    }
+    if value
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '#' | '"' | '\''))
+    {
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        return format!("{key}=\"{escaped}\"\n");
+    }
+    format!("{key}={value}\n")
 }
 
 pub fn remove_app_dir(apps_dir: &Path, id: &str) -> Result<(), ApiError> {
@@ -49,8 +149,12 @@ pub async fn compose(
     if !file.exists() {
         return Err(ApiError::NotFound);
     }
+    let dir = file.parent().unwrap_or(apps_dir);
     let mut cmd = Command::new("docker");
-    cmd.arg("compose")
+    cmd.current_dir(dir)
+        .arg("compose")
+        .arg("--project-directory")
+        .arg(dir)
         .arg("-f")
         .arg(&file)
         .arg("-p")
@@ -188,3 +292,4 @@ pub fn docker_available() -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+

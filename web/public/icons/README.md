@@ -10,7 +10,7 @@ Runtime overlay wins over bundled files and does not need a UI rebuild — refre
 | --- | --- |
 | `files.svg` | Files app |
 | `apps.svg` | Apps |
-| `services.svg` | Services |
+| `services.svg` | Services app |
 | `settings.svg` | Settings |
 | `install.svg` | Install |
 | `docker.svg` | Compose apps without their own icon |

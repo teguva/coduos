@@ -55,9 +55,9 @@
   }
 </script>
 
-<AppWindow title="Tasks" icon="cpu" size="xl" {onClose}>
+<AppWindow title="Services" icon="services" fileIcon size="xl" {onClose}>
   {#snippet actions()}
-    <div class="os-tabs" role="tablist" aria-label="Task view">
+    <div class="os-tabs" role="tablist" aria-label="Services view">
       <button class="os-tab" class:active={tab === 'host'} role="tab" aria-selected={tab === 'host'} onclick={() => (tab = 'host')}>Host</button>
       <button class="os-tab" class:active={tab === 'apps'} role="tab" aria-selected={tab === 'apps'} onclick={() => (tab = 'apps')}>Containers</button>
     </div>

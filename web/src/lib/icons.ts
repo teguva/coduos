@@ -17,7 +17,6 @@ export const appIcons = {
   docker: 'docker',
   computer: 'computer',
   storage: 'disk',
-  tasks: 'cpu',
   vpn: 'folder-locked',
   ddns: 'folder-cloud',
   proxy: 'server',
