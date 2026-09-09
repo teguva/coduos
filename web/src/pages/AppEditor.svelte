@@ -2,13 +2,17 @@
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
   import { addService, exampleStack, slug, stackToYaml, yamlToStack, type StackForm } from '../lib/compose';
+  import AppWindow from '../components/AppWindow.svelte';
   import ComposeEditor from '../components/ComposeEditor.svelte';
+  import ComposeEnv from '../components/ComposeEnv.svelte';
+  import UiIcon from '../components/UiIcon.svelte';
 
-  let { go, id } = $props<{ go: (to: string) => void; id?: string }>();
+  let { go, id, onClose } = $props<{ go: (to: string) => void; id?: string; onClose: () => void }>();
 
   let stack = $state<StackForm>(exampleStack());
   let yaml = $state('');
   let mode = $state<'form' | 'yaml'>('form');
+  let pane = $state<'app' | 'services' | 'env'>('app');
   let tab = $state(0);
   let appId = $state('');
   let logs = $state('');
@@ -18,6 +22,25 @@
   let statusError = $state('');
 
   const extras = $derived(Object.keys(stack.extraDoc).sort());
+  const envTotal = $derived(stack.services.reduce((n, s) => n + s.env.filter((e) => e.key.trim()).length, 0));
+  const svc = $derived(stack.services[tab]);
+
+  function svcMeta(s: StackForm['services'][number]) {
+    const bits: string[] = [];
+    if (s.ports.length) bits.push(`${s.ports.length} port${s.ports.length === 1 ? '' : 's'}`);
+    const env = s.env.filter((e) => e.key.trim()).length;
+    if (env) bits.push(`${env} env`);
+    if (s.volumes.length) bits.push(`${s.volumes.length} vol${s.volumes.length === 1 ? '' : 's'}`);
+    return bits.join(' · ');
+  }
+
+  function imageTail(image: string) {
+    const s = image.trim();
+    if (!s) return 'No image';
+    const noDigest = s.split('@')[0];
+    const name = noDigest.split('/').pop() || noDigest;
+    return name;
+  }
 
   function syncYaml() {
     yaml = stackToYaml(stack);
@@ -27,6 +50,7 @@
     stack = yamlToStack(yaml);
     const i = stack.services.findIndex((s) => s.serviceName === keep);
     tab = i >= 0 ? i : 0;
+    if (stack.services.length > 1 && pane === 'app') pane = 'services';
   }
 
   function setMode(next: 'form' | 'yaml') {
@@ -38,6 +62,7 @@
   function add() {
     stack = addService(stack);
     tab = stack.services.length - 1;
+    pane = 'services';
   }
 
   function removeAt(i: number) {
@@ -45,6 +70,11 @@
     stack = { ...stack, services: stack.services.filter((_, n) => n !== i) };
     if (tab >= stack.services.length) tab = stack.services.length - 1;
     else if (tab > i) tab -= 1;
+  }
+
+  function openService(i: number) {
+    tab = i;
+    pane = 'services';
   }
 
   onMount(async () => {
@@ -63,6 +93,7 @@
       appId = app.id;
       running = app.status?.running;
       statusError = app.status?.error || '';
+      pane = stack.services.length > 1 ? 'services' : 'app';
     } catch (e: any) {
       error = e.message;
     }
@@ -70,8 +101,22 @@
 
   async function save(e: Event) {
     e.preventDefault();
-    busy = 'save';
     error = '';
+    if (mode === 'form') {
+      if (!stack.title.trim()) {
+        pane = 'app';
+        error = 'Give the app a title.';
+        return;
+      }
+      const bad = stack.services.findIndex((s) => !s.serviceName.trim() || !s.image.trim());
+      if (bad >= 0) {
+        tab = bad;
+        pane = 'services';
+        error = 'Each service needs a name and a Docker image.';
+        return;
+      }
+    }
+    busy = 'save';
     try {
       if (mode === 'form') syncYaml();
       else syncForm();
@@ -122,92 +167,135 @@
   }
 </script>
 
-<div class="top">
-  <div>
-    <div class="sub">{id ? (running ? 'Running' : 'Stopped') : 'Visual compose editor — Form or YAML'}</div>
-  </div>
-  <div class="row">
-    <button type="button" class="btn secondary" class:active={mode === 'form'} onclick={() => setMode('form')}>Form</button>
-    <button type="button" class="btn secondary" class:active={mode === 'yaml'} onclick={() => setMode('yaml')}>YAML</button>
+<AppWindow title={id ? 'App settings' : 'Install app'} icon={id ? 'apps' : 'install'} size="xl" {onClose}>
+  {#snippet actions()}
+    <div class="os-tabs" role="tablist" aria-label="Editor mode">
+      <button type="button" class="os-tab" class:active={mode === 'form'} role="tab" aria-selected={mode === 'form'} onclick={() => setMode('form')}>Form</button>
+      <button type="button" class="os-tab" class:active={mode === 'yaml'} role="tab" aria-selected={mode === 'yaml'} onclick={() => setMode('yaml')}>YAML</button>
+    </div>
     {#if id}
-      <button class="btn" disabled={!!busy} onclick={() => act('start')}>Start</button>
-      <button class="btn secondary" disabled={!!busy} onclick={() => act('stop')}>Stop</button>
-      <button class="btn secondary" disabled={!!busy} onclick={() => act('restart')}>Restart</button>
-      {#if stack.webPort}
-        <a class="btn secondary" href="{stack.scheme}://{stack.webHost || location.hostname}:{stack.webPort}{stack.webPath || '/'}" target="_blank" rel="noreferrer">Open</a>
-        <button type="button" class="btn secondary" onclick={() => go(`/proxy?app=${encodeURIComponent(id)}&port=${stack.webPort}`)}>Add to Proxy</button>
+      {#if !running}
+        <button class="btn compact" disabled={!!busy} onclick={() => act('start')}>Start</button>
+      {:else}
+        <button class="btn secondary compact" disabled={!!busy} onclick={() => act('stop')}>Stop</button>
       {/if}
-      <button class="btn danger" onclick={remove}>Delete</button>
+      <button class="btn secondary compact" disabled={!!busy} onclick={() => act('restart')}>Restart</button>
+      {#if stack.webPort}
+        <a class="btn secondary compact" href="{stack.scheme}://{stack.webHost || location.hostname}:{stack.webPort}{stack.webPath || '/'}" target="_blank" rel="noreferrer">Open</a>
+      {/if}
     {/if}
-  </div>
-</div>
+  {/snippet}
 
 {#if statusError}<div class="err">{statusError}</div>{/if}
 {#if error}<div class="err">{error}</div>{/if}
 
 <form onsubmit={save}>
-  {#if !id}
-    <label class="field"><span>Id (optional)</span><input bind:value={appId} placeholder="immich" /></label>
-  {/if}
   {#if mode === 'form'}
-    <section class="form-sec">
-      <label class="field"><span>Title</span><input bind:value={stack.title} placeholder="Immich" required /></label>
-      <label class="field"><span>Icon URL</span>
-        <div class="icon-row">
-          {#if stack.iconUrl}
-            <img class="app-icon" src={stack.iconUrl} alt="" />
-          {:else}
-            <img class="app-icon" src="/icons/docker.svg" alt="" />
-          {/if}
-          <input bind:value={stack.iconUrl} placeholder="https://…" />
-        </div>
-      </label>
-      <div class="field">
-        <span>Web UI</span>
-        <div class="webui">
-          <select bind:value={stack.scheme}>
-            <option value="http">http://</option>
-            <option value="https">https://</option>
-          </select>
-          <input bind:value={stack.webHost} placeholder={typeof location !== 'undefined' ? location.hostname : 'host'} />
-          <input bind:value={stack.webPort} placeholder="2283" />
-          <input bind:value={stack.webPath} placeholder="/" />
-        </div>
-      </div>
-      {#if extras.length}
-        <p class="hint">Kept from YAML: {extras.join(', ')}</p>
-      {/if}
-    </section>
-
-    <div class="stack-tabs" role="tablist" aria-label="Services in this stack">
-      {#each stack.services as svc, i}
-        <div class="stack-tab" class:active={tab === i} role="tab" aria-selected={tab === i}>
-          <button type="button" class="stack-tab-name" onclick={() => (tab = i)}>
-            {svc.serviceName || `service-${i + 1}`}
-          </button>
-          {#if stack.services.length > 1}
-            <button type="button" class="stack-tab-x" title="Remove service" onclick={() => removeAt(i)}>×</button>
-          {/if}
-        </div>
-      {/each}
-      <button type="button" class="stack-tab add" onclick={add}>+ Add service</button>
+    <div class="os-tabs form-tabs" role="tablist" aria-label="Compose sections">
+      <button type="button" class="os-tab" class:active={pane === 'app'} role="tab" aria-selected={pane === 'app'} onclick={() => (pane = 'app')}>App</button>
+      <button type="button" class="os-tab" class:active={pane === 'services'} role="tab" aria-selected={pane === 'services'} onclick={() => (pane = 'services')}>
+        Services{#if stack.services.length > 1}<span class="tab-count">{stack.services.length}</span>{/if}
+      </button>
+      <button type="button" class="os-tab" class:active={pane === 'env'} role="tab" aria-selected={pane === 'env'} onclick={() => (pane = 'env')}>
+        Environment{#if envTotal}<span class="tab-count">{envTotal}</span>{/if}
+      </button>
     </div>
 
-    {#key tab}
-      {#if stack.services[tab]}
-        <ComposeEditor bind:service={stack.services[tab]} />
-      {/if}
-    {/key}
+    {#if pane === 'app'}
+      <section class="form-sec">
+        <div class="app-grid">
+          <label class="field"><span>Title</span><input bind:value={stack.title} placeholder="Immich" required /></label>
+          {#if !id}
+            <label class="field"><span>Id (optional)</span><input bind:value={appId} placeholder="immich" /></label>
+          {:else}
+            <label class="field"><span>Id</span><input value={appId} disabled /></label>
+          {/if}
+          <label class="field span-2"><span>Icon URL</span>
+            <div class="icon-row">
+              {#if stack.iconUrl}
+                <img class="app-icon" src={stack.iconUrl} alt="" />
+              {:else}
+                <img class="app-icon" src="/icons/docker.svg" alt="" />
+              {/if}
+              <input bind:value={stack.iconUrl} placeholder="https://…" />
+            </div>
+          </label>
+        </div>
+        <div class="field">
+          <span>Web UI</span>
+          <div class="webui">
+            <label class="field"><span>Scheme</span>
+              <select bind:value={stack.scheme}>
+                <option value="http">http://</option>
+                <option value="https">https://</option>
+              </select>
+            </label>
+            <label class="field"><span>Host</span>
+              <input bind:value={stack.webHost} placeholder={typeof location !== 'undefined' ? location.hostname : 'host'} />
+            </label>
+            <label class="field"><span>Port</span>
+              <input bind:value={stack.webPort} placeholder="2283" />
+            </label>
+            <label class="field"><span>Path</span>
+              <input bind:value={stack.webPath} placeholder="/" />
+            </label>
+          </div>
+        </div>
+        {#if extras.length}
+          <p class="hint">Kept from YAML: {extras.join(', ')}</p>
+        {/if}
+        <p class="hint">{id ? (running ? 'Running' : 'Stopped') : 'Name the app, then set services and environment.'}</p>
+      </section>
+    {:else if pane === 'services'}
+      <div class="compose-split">
+        <nav class="svc-rail" aria-label="Services">
+          {#each stack.services as s, i}
+            <div class="svc-item" class:active={tab === i}>
+              <button type="button" class="svc-pick" onclick={() => (tab = i)}>
+                <span class="svc-name">{s.serviceName || `service-${i + 1}`}</span>
+                <span class="svc-meta">{svcMeta(s) || imageTail(s.image)}</span>
+              </button>
+              {#if stack.services.length > 1}
+                <button type="button" class="svc-x" title="Remove service" onclick={() => removeAt(i)}>
+                  <UiIcon name="close" size={16} />
+                </button>
+              {/if}
+            </div>
+          {/each}
+          <button type="button" class="svc-add" onclick={add}>
+            <UiIcon name="add" size={18} /> Add service
+          </button>
+        </nav>
+        <div class="svc-body">
+          {#key tab}
+            {#if svc}
+              <ComposeEditor bind:service={stack.services[tab]} />
+            {/if}
+          {/key}
+        </div>
+      </div>
+    {:else}
+      <ComposeEnv bind:stack onOpenService={openService} />
+    {/if}
   {:else}
     <label class="field"><span>compose.yml</span><textarea class="yaml-editor" bind:value={yaml} required></textarea></label>
   {/if}
-  <button class="btn" disabled={!!busy}>{id ? 'Save' : 'Create'}</button>
+  <div class="row">
+    <button class="btn" disabled={!!busy}>{id ? 'Save' : 'Create'}</button>
+    {#if id}
+      {#if stack.webPort}
+        <button type="button" class="btn secondary" onclick={() => go(`/proxy?app=${encodeURIComponent(id)}&port=${stack.webPort}`)}>Add to Proxy</button>
+      {/if}
+      <button type="button" class="btn danger" onclick={remove}>Delete</button>
+    {/if}
+  </div>
 </form>
 
 {#if id}
   <div class="top" style="margin-top:24px">
     <h2>Logs</h2>
-    <button class="btn secondary" onclick={loadLogs}>Refresh logs</button>
+    <button class="btn secondary compact" onclick={loadLogs}>Refresh logs</button>
   </div>
   <pre class="logs">{logs || 'Click refresh to load logs.'}</pre>
 {/if}
+</AppWindow>

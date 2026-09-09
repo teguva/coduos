@@ -2,11 +2,13 @@
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
   import { bytes } from '../lib/format';
+  import AppWindow from '../components/AppWindow.svelte';
   import Confirm from '../components/Confirm.svelte';
 
   type Proc = { pid: number; name: string; cpu_percent: number; mem_bytes: number };
   type Ctn = { name: string; cpu_percent: number; mem_usage: string; pids: string };
 
+  let { onClose } = $props<{ onClose: () => void }>();
   let tab = $state<'host' | 'apps'>('host');
   let processes = $state<Proc[]>([]);
   let containers = $state<Ctn[]>([]);
@@ -53,20 +55,24 @@
   }
 </script>
 
-<div class="segment" style="margin-bottom:16px">
-  <button class="btn secondary" class:active={tab === 'host'} onclick={() => (tab = 'host')}>Host</button>
-  <button class="btn secondary" class:active={tab === 'apps'} onclick={() => (tab = 'apps')}>Apps</button>
-</div>
+<AppWindow title="Tasks" icon="cpu" size="xl" {onClose}>
+  {#snippet actions()}
+    <div class="os-tabs" role="tablist" aria-label="Task view">
+      <button class="os-tab" class:active={tab === 'host'} role="tab" aria-selected={tab === 'host'} onclick={() => (tab = 'host')}>Host</button>
+      <button class="os-tab" class:active={tab === 'apps'} role="tab" aria-selected={tab === 'apps'} onclick={() => (tab = 'apps')}>Containers</button>
+    </div>
+  {/snippet}
+
 {#if error}<div class="err">{error}</div>{/if}
 
 {#if tab === 'host'}
   <table class="table">
     <thead>
       <tr>
-        <th><button class="linkish" onclick={() => (sort = 'name')}>Name</button></th>
+        <th><button class="linkish" class:active={sort === 'name'} onclick={() => (sort = 'name')}>Name</button></th>
         <th>PID</th>
-        <th><button class="linkish" onclick={() => (sort = 'cpu')}>CPU</button></th>
-        <th><button class="linkish" onclick={() => (sort = 'mem')}>Memory</button></th>
+        <th><button class="linkish" class:active={sort === 'cpu'} onclick={() => (sort = 'cpu')}>CPU</button></th>
+        <th><button class="linkish" class:active={sort === 'mem'} onclick={() => (sort = 'mem')}>Memory</button></th>
         <th></th>
       </tr>
     </thead>
@@ -79,7 +85,7 @@
           <td>{bytes(p.mem_bytes)}</td>
           <td>
             {#if p.pid > 1 && p.name !== 'coduosd'}
-              <button class="btn secondary danger-text" onclick={() => (pending = p)}>End</button>
+              <button class="btn secondary compact" onclick={() => (pending = p)}>End</button>
             {/if}
           </td>
         </tr>
@@ -103,6 +109,7 @@
     </tbody>
   </table>
 {/if}
+</AppWindow>
 
 {#if pending}
   <Confirm

@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, toggleTheme, isLight } from '../lib/api';
+  import { applyPower as sendPower } from '../lib/power';
   import { bytes, bps, pct, uptime, shortOs, prettyGpu, watts, joinMeta, batteryLabel } from '../lib/format';
   import { appIcons, appIcon, iconRev } from '../lib/icons';
   import Icon from './Icon.svelte';
+  import UiIcon from './UiIcon.svelte';
   import Sparkline from './Sparkline.svelte';
   import Confirm from './Confirm.svelte';
 
@@ -76,6 +78,8 @@
   let now = $state(new Date());
   let menu = $state(false);
   let netHist = $state<{ rx: number; tx: number }[]>([]);
+  let cpuHist = $state<number[]>([]);
+  let memHist = $state<number[]>([]);
   let query = $state('');
   let searchEl = $state<HTMLInputElement | null>(null);
   let powerConfirm = $state<'reboot' | 'shutdown' | null>(null);
@@ -117,6 +121,24 @@
       summary?.batteries?.[0]
   );
 
+  function loadTone(p: number) {
+    if (p >= 90) return 'danger';
+    if (p >= 75) return 'warn';
+    return '';
+  }
+
+  function recordHist(s: Summary) {
+    cpuHist = [...cpuHist, s.cpu_percent].slice(-90);
+    memHist = [...memHist, pct(s.mem_used, s.mem_total)].slice(-90);
+    const nets: Net[] = s.networks ?? [];
+    const n =
+      nets.find((x) => !x.virtual_iface && x.operstate === 'up') ||
+      nets.find((x) => !x.virtual_iface);
+    if (n) {
+      netHist = [...netHist, { rx: n.rx_bps, tx: n.tx_bps }].slice(-90);
+    }
+  }
+
   function appActive(to: string) {
     if (to === '/apps') {
       return path === '/apps' || (path.startsWith('/apps/') && path !== '/apps/new');
@@ -129,13 +151,7 @@
     es.onmessage = (ev) => {
       try {
         summary = JSON.parse(ev.data);
-        const nets: Net[] = summary?.networks ?? [];
-        const n =
-          nets.find((x) => !x.virtual_iface && x.operstate === 'up') ||
-          nets.find((x) => !x.virtual_iface);
-        if (n) {
-          netHist = [...netHist, { rx: n.rx_bps, tx: n.tx_bps }].slice(-90);
-        }
+        if (summary) recordHist(summary);
       } catch {
         /* ignore */
       }
@@ -143,12 +159,7 @@
     api<Summary>('/api/system/summary')
       .then((s) => {
         summary = s;
-        const n =
-          (s.networks ?? []).find((x) => !x.virtual_iface && x.operstate === 'up') ||
-          (s.networks ?? []).find((x) => !x.virtual_iface);
-        if (n) {
-          netHist = [{ rx: n.rx_bps, tx: n.tx_bps }];
-        }
+        recordHist(s);
       })
       .catch(() => {});
     api<App[]>('/api/apps')
@@ -163,10 +174,13 @@
       searchEl?.focus();
     };
     window.addEventListener('keydown', onKey);
+    const onTheme = () => (light = isLight());
+    window.addEventListener('coduos-theme', onTheme);
     return () => {
       es.close();
       clearInterval(c);
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('coduos-theme', onTheme);
     };
   });
 
@@ -187,7 +201,7 @@
     powerConfirm = null;
     menu = false;
     try {
-      await api('/api/system/power', { method: 'POST', body: JSON.stringify({ action }) });
+      await sendPower(action);
     } catch {
       powerBusy = '';
     }
@@ -198,26 +212,40 @@
   <header class="topbar">
     <div>
       <div class="host">{summary?.hostname ?? 'CoduOS'}</div>
-      <div class="clock">{now.toLocaleString()}{#if summary} · up {uptime(summary.uptime_secs)}{/if}</div>
+      <div class="clock">
+        {#if summary}{shortOs(summary.os)} · up {uptime(summary.uptime_secs)} · {/if}{now.toLocaleString()}
+      </div>
     </div>
     <div class="topbar-actions">
-      <button class="icon-btn hit" onclick={() => { toggleTheme(); light = isLight(); }}>{light ? 'Dark' : 'Light'}</button>
-      <button class="icon-btn hit" onclick={() => (menu = !menu)}>{username}</button>
-      <button class="icon-btn hit hide-phone" onclick={onLogout}>Sign out</button>
+      <button class="icon-btn hit" onclick={() => { toggleTheme(); light = isLight(); }} aria-label={light ? 'Dark theme' : 'Light theme'}>
+        <UiIcon name={light ? 'dark_mode' : 'light_mode'} size={18} />
+      </button>
+      <button class="icon-btn hit" onclick={() => (menu = !menu)}>
+        <UiIcon name="person" size={18} /> {username}
+      </button>
+      <button class="icon-btn hit hide-phone" onclick={onLogout} aria-label="Sign out">
+        <UiIcon name="logout" size={18} />
+      </button>
     </div>
   </header>
   {#if menu}
     <div class="avatar-sheet">
-      <button class="hit" onclick={() => { menu = false; go('/settings'); }}>Settings</button>
+      <button class="hit" onclick={() => { menu = false; go('/settings'); }}>
+        <UiIcon name="settings" size={18} /> Settings
+      </button>
       {#if summary?.privileged}
         <button class="hit" disabled={!!powerBusy} onclick={() => { menu = false; powerConfirm = 'reboot'; }}>
+          <UiIcon name="power" size={18} />
           {powerBusy === 'reboot' ? 'Rebooting…' : 'Reboot'}
         </button>
         <button class="hit" disabled={!!powerBusy} onclick={() => { menu = false; powerConfirm = 'shutdown'; }}>
+          <UiIcon name="power" size={18} />
           {powerBusy === 'shutdown' ? 'Shutting down…' : 'Shut down'}
         </button>
       {/if}
-      <button class="hit" onclick={() => { menu = false; onLogout(); }}>Sign out</button>
+      <button class="hit" onclick={() => { menu = false; onLogout(); }}>
+        <UiIcon name="logout" size={18} /> Sign out
+      </button>
     </div>
   {/if}
 
@@ -225,42 +253,52 @@
     <aside class="widget-col">
       {#if summary}
         <button class="widget hit" onclick={() => tap('/tasks')}>
-          <div class="gauge" style="--p:{summary.cpu_percent}"><span>{summary.cpu_percent.toFixed(0)}%</span></div>
+          <div class="gauge {loadTone(summary.cpu_percent)}" style="--p:{summary.cpu_percent}">
+            <span>{summary.cpu_percent.toFixed(0)}%</span>
+          </div>
           <div>
-            <h3><Icon name="cpu" size={16} alt="" /> CPU</h3>
-            <div>
+            <h3><UiIcon name="cpu" size={14} /> CPU</h3>
+            <div class="meta">
               {joinMeta([
-                summary.cpu_power_w != null ? watts(summary.cpu_power_w) : null,
                 `${summary.cpu_cores} cores`,
-                summary.cpu_temp_c != null ? `${summary.cpu_temp_c.toFixed(0)}°C` : null
+                summary.cpu_temp_c != null ? `${summary.cpu_temp_c.toFixed(0)}°C` : null,
+                summary.cpu_power_w != null ? watts(summary.cpu_power_w) : null
               ])}
             </div>
-            <div class="meta clip">{shortOs(summary.os)}</div>
+            {#if cpuHist.length > 1}
+              <div class="widget-spark"><Sparkline rx={cpuHist} tx={[]} /></div>
+            {/if}
           </div>
         </button>
         {#if gpu}
           <button class="widget hit" onclick={() => tap('/tasks')}>
-            <div class="gauge" style="--p:{gpu.util_percent ?? 0}">
-              <span>{gpu.util_percent != null ? gpu.util_percent.toFixed(0) + '%' : 'GPU'}</span>
+            <div class="gauge {loadTone(gpu.util_percent ?? 0)}" style="--p:{gpu.util_percent ?? 0}">
+              <span>{gpu.util_percent != null ? gpu.util_percent.toFixed(0) + '%' : '—'}</span>
             </div>
             <div>
-              <h3>GPU</h3>
-              <div class="clip">{prettyGpu(gpu.name)}</div>
+              <h3><UiIcon name="gpu" size={14} /> GPU</h3>
+              <div class="clip headline">{prettyGpu(gpu.name)}</div>
               <div class="meta">
                 {joinMeta([
                   gpu.power_w != null ? watts(gpu.power_w) : null,
                   gpu.temp_c != null ? `${gpu.temp_c.toFixed(0)}°C` : null,
                   gpu.mem_used != null && gpu.mem_total ? `${bytes(gpu.mem_used)} / ${bytes(gpu.mem_total)}` : null
-                ]) || 'Integrated graphics'}
+                ])}
               </div>
             </div>
           </button>
         {/if}
         <button class="widget hit" onclick={() => tap('/tasks')}>
-          <div class="gauge" style="--p:{pct(summary.mem_used, summary.mem_total)}"><span>{pct(summary.mem_used, summary.mem_total)}%</span></div>
+          <div class="gauge {loadTone(pct(summary.mem_used, summary.mem_total))}" style="--p:{pct(summary.mem_used, summary.mem_total)}">
+            <span>{pct(summary.mem_used, summary.mem_total)}%</span>
+          </div>
           <div>
-            <h3><Icon name="memory" size={16} alt="" /> Memory</h3>
-            <div>{bytes(summary.mem_used)} / {bytes(summary.mem_total)}</div>
+            <h3><UiIcon name="memory" size={14} /> Memory</h3>
+            <div class="headline">{bytes(summary.mem_total - summary.mem_used)} free</div>
+            <div class="meta">{bytes(summary.mem_used)} / {bytes(summary.mem_total)}</div>
+            {#if memHist.length > 1}
+              <div class="widget-spark"><Sparkline rx={memHist} tx={[]} /></div>
+            {/if}
           </div>
         </button>
         {#if battery && battery.capacity_pct != null}
@@ -269,10 +307,12 @@
             class:low={battery.capacity_pct < 20 && !battery.charging && !battery.ac_online}
             onclick={() => tap('/settings')}
           >
-            <div class="gauge" style="--p:{battery.capacity_pct}"><span>{battery.capacity_pct}%</span></div>
+            <div class="gauge {battery.capacity_pct < 20 && !battery.charging ? 'danger' : ''}" style="--p:{battery.capacity_pct}">
+              <span>{battery.capacity_pct}%</span>
+            </div>
             <div>
-              <h3><Icon name={appIcons.battery} size={16} alt="" /> Battery</h3>
-              <div>{batteryLabel(battery)}</div>
+              <h3><UiIcon name="battery" size={14} /> Battery</h3>
+              <div class="headline">{batteryLabel(battery)}</div>
               <div class="meta clip">
                 {joinMeta([
                   battery.charging && battery.power_w ? watts(battery.power_w) : null,
@@ -280,8 +320,7 @@
                     ? battery.start_pct != null && battery.start_pct < battery.limit_pct
                       ? `${battery.start_pct}–${battery.limit_pct}%`
                       : `limit ${battery.limit_pct}%`
-                    : null,
-                  battery.name
+                    : null
                 ])}
               </div>
             </div>
@@ -290,30 +329,50 @@
         {#if primaryNet}
           <button class="widget widget-net hit" onclick={() => tap('/settings/network')}>
             <div>
-              <h3><Icon name={appIcons.network} size={16} alt="" /> Network</h3>
-              <div>↓ {bps(primaryNet.rx_bps)} ↑ {bps(primaryNet.tx_bps)}</div>
-              <div class="meta clip">{primaryNet.ipv4 || primaryNet.name}</div>
+              <h3><UiIcon name="network" size={14} /> Network</h3>
+              <div class="net-rates">
+                <span class="net-rx"><UiIcon name="arrow_downward" size={16} /> {bps(primaryNet.rx_bps)}</span>
+                <span class="net-tx"><UiIcon name="arrow_upward" size={16} /> {bps(primaryNet.tx_bps)}</span>
+              </div>
+              <div class="meta clip">
+                {joinMeta([
+                  primaryNet.ipv4,
+                  primaryNet.name,
+                  primaryNet.speed_mbps
+                    ? primaryNet.speed_mbps >= 1000
+                      ? `${primaryNet.speed_mbps / 1000} Gb/s`
+                      : `${primaryNet.speed_mbps} Mb/s`
+                    : null
+                ])}
+              </div>
             </div>
-            <Sparkline rx={netHist.map((s) => s.rx)} tx={netHist.map((s) => s.tx)} />
+            <Sparkline rx={netHist.map((s) => s.rx)} tx={netHist.map((s) => s.tx)} showScale />
           </button>
         {/if}
         {#if worstDisk}
           <button class="widget hit" onclick={() => tap('/settings/storage')}>
-            <div class="gauge" style="--p:{pct(worstDisk.used, worstDisk.total)}"><span>{pct(worstDisk.used, worstDisk.total)}%</span></div>
+            <div class="gauge {loadTone(pct(worstDisk.used, worstDisk.total))}" style="--p:{pct(worstDisk.used, worstDisk.total)}">
+              <span>{pct(worstDisk.used, worstDisk.total)}%</span>
+            </div>
             <div>
-              <h3><Icon name="disk" size={16} alt="" /> Storage</h3>
-              <div class="clip">{worstDisk.mount === '/' ? 'System disk' : worstDisk.mount}</div>
-              <div class="meta">{bytes(worstDisk.used)} / {bytes(worstDisk.total)}</div>
+              <h3><UiIcon name="storage" size={14} /> Storage</h3>
+              <div class="headline">{bytes(worstDisk.total - worstDisk.used)} free</div>
+              <div class="meta clip">
+                {joinMeta([
+                  worstDisk.mount === '/' ? 'System disk' : worstDisk.mount,
+                  `${bytes(worstDisk.used)} / ${bytes(worstDisk.total)}`,
+                  (summary.disks?.length ?? 0) > 1 ? `${summary.disks.length} disks` : null
+                ])}
+              </div>
             </div>
           </button>
         {/if}
         {#if topProc}
           <button class="widget hit" onclick={() => tap('/tasks')}>
-            <div class="gauge" style="--p:{Math.min(100, topProc.cpu_percent)}"><span>{Math.min(100, topProc.cpu_percent).toFixed(0)}%</span></div>
             <div>
-              <h3>Tasks</h3>
-              <div class="clip">{topProc.name}</div>
-              <div class="meta">{bytes(topProc.mem_bytes)}</div>
+              <h3><UiIcon name="view_list" size={14} /> Tasks</h3>
+              <div class="clip headline">{topProc.name}</div>
+              <div class="meta">{topProc.cpu_percent.toFixed(0)}% CPU · {bytes(topProc.mem_bytes)}</div>
             </div>
           </button>
         {/if}
@@ -323,6 +382,7 @@
     <section class="desk-main">
       <label class="desk-search">
         <span class="meta">Search</span>
+        <UiIcon name="search" size={18} />
         <input
           bind:this={searchEl}
           bind:value={query}
@@ -356,16 +416,16 @@
 
   <nav class="bottom-nav" aria-label="Main">
     <button class="hit" class:active={path === '/'} onclick={() => go('/')}>
-      <Icon name="go-home" size={22} alt="" /> Home
+      <UiIcon name="home" size={22} /> Home
     </button>
     <button class="hit" class:active={path.startsWith('/files')} onclick={() => go('/files')}>
-      <Icon name={appIcons.files} size={22} alt="" /> Files
+      <UiIcon name="folder" size={22} /> Files
     </button>
     <button class="hit" class:active={path.startsWith('/apps')} onclick={() => go('/apps')}>
-      <Icon name={appIcons.apps} size={22} alt="" /> Apps
+      <UiIcon name="apps" size={22} /> Apps
     </button>
     <button class="hit" class:active={path.startsWith('/settings')} onclick={() => go('/settings')}>
-      <Icon name={appIcons.settings} size={22} alt="" /> Settings
+      <UiIcon name="settings" size={22} /> Settings
     </button>
   </nav>
 </div>

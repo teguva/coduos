@@ -11,9 +11,6 @@
   function addVol() {
     service.volumes = [...service.volumes, { host: '', container: '' }];
   }
-  function addEnv() {
-    service.env = [...service.env, { key: '', value: '' }];
-  }
   function addDev() {
     service.devices = [...service.devices, { host: '', container: '' }];
   }
@@ -23,26 +20,27 @@
 </script>
 
 <section class="form-sec">
-  <label class="field"><span>Service name</span><input bind:value={service.serviceName} placeholder="immich-server" required /></label>
-  <label class="field"><span>Docker Image</span><input bind:value={service.image} placeholder="ghcr.io/immich-app/immich-server:release" required /></label>
-  <label class="field"><span>Depends on</span><input bind:value={service.dependsOn} placeholder="database, redis" /></label>
-  <label class="field"><span>Network</span>
-    <select bind:value={service.network}>
-      <option value="stack">stack (compose network)</option>
-      <option value="bridge">bridge</option>
-      <option value="host">host</option>
-      <option value="none">none</option>
-    </select>
-  </label>
+  <div class="app-grid">
+    <label class="field"><span>Service name</span><input bind:value={service.serviceName} placeholder="immich-server" required /></label>
+    <label class="field"><span>Network</span>
+      <select bind:value={service.network}>
+        <option value="stack">stack (compose network)</option>
+        <option value="bridge">bridge</option>
+        <option value="host">host</option>
+        <option value="none">none</option>
+      </select>
+    </label>
+  </div>
+  <label class="field"><span>Docker image</span><input bind:value={service.image} placeholder="ghcr.io/immich-app/immich-server:release" required /></label>
   {#if extraKeys.length}
     <p class="hint">Kept from YAML: {extraKeys.join(', ')}</p>
   {/if}
 </section>
 
 <section class="form-sec">
-  <div class="sec-head"><h3>Ports</h3><button type="button" class="btn secondary" onclick={addPort}>Add</button></div>
+  <div class="sec-head"><h3>Ports</h3><button type="button" class="btn secondary compact" onclick={addPort}>Add</button></div>
   {#if service.ports.length === 0}
-    <p class="hint">No ports now, click Add.</p>
+    <p class="hint">No published ports.</p>
   {:else}
     <div class="kv-head"><span>Host</span><span>Container</span><span>Protocol</span><span></span></div>
     {#each service.ports as p, i}
@@ -61,9 +59,9 @@
 </section>
 
 <section class="form-sec">
-  <div class="sec-head"><h3>Volumes</h3><button type="button" class="btn secondary" onclick={addVol}>Add</button></div>
+  <div class="sec-head"><h3>Volumes</h3><button type="button" class="btn secondary compact" onclick={addVol}>Add</button></div>
   {#if service.volumes.length === 0}
-    <p class="hint">Click Add to map a host folder into the container.</p>
+    <p class="hint">No host folders mapped into this container.</p>
   {:else}
     <div class="kv-head two"><span>Host</span><span>Container</span><span></span></div>
     {#each service.volumes as v, i}
@@ -77,25 +75,9 @@
 </section>
 
 <section class="form-sec">
-  <div class="sec-head"><h3>Environment Variables</h3><button type="button" class="btn secondary" onclick={addEnv}>Add</button></div>
-  {#if service.env.length === 0}
-    <p class="hint">Click Add to set KEY=value.</p>
-  {:else}
-    <div class="kv-head two"><span>Key</span><span>Value</span><span></span></div>
-    {#each service.env as e, i}
-      <div class="kv-row two">
-        <input bind:value={e.key} placeholder="PUID" />
-        <input bind:value={e.value} placeholder="1000" />
-        <button type="button" class="close-x" onclick={() => (service.env = drop(service.env, i))}>×</button>
-      </div>
-    {/each}
-  {/if}
-</section>
-
-<section class="form-sec">
-  <div class="sec-head"><h3>Devices</h3><button type="button" class="btn secondary" onclick={addDev}>Add</button></div>
+  <div class="sec-head"><h3>Devices</h3><button type="button" class="btn secondary compact" onclick={addDev}>Add</button></div>
   {#if service.devices.length === 0}
-    <p class="hint">Click Add for /dev mappings (e.g. GPU).</p>
+    <p class="hint">No device mappings (GPU, USB, …).</p>
   {:else}
     <div class="kv-head two"><span>Host</span><span>Container</span><span></span></div>
     {#each service.devices as d, i}
@@ -108,7 +90,9 @@
   {/if}
 </section>
 
-<section class="form-sec">
+<details class="form-sec advanced">
+  <summary>Advanced</summary>
+  <label class="field"><span>Depends on</span><input bind:value={service.dependsOn} placeholder="database, redis" /></label>
   <label class="field"><span>Container command</span><input bind:value={service.command} placeholder="optional" /></label>
   <label class="toggle-row">
     <span>Privileges</span>
@@ -138,4 +122,4 @@
   </label>
   <label class="field"><span>Container capabilities (cap-add)</span><input bind:value={service.capAdd} placeholder="SYS_ADMIN, NET_ADMIN" /></label>
   <label class="field"><span>Container hostname</span><input bind:value={service.hostname} placeholder="Hostname of this container" /></label>
-</section>
+</details>

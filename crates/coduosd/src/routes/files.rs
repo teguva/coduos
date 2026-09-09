@@ -1,15 +1,19 @@
-use std::path::PathBuf;
+use std::io::SeekFrom;
+use std::path::{Path, PathBuf};
 
 use axum::body::Body;
 use axum::extract::{Multipart, Query, State};
-use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
-use axum::http::StatusCode;
+use axum::http::header::{
+    ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE,
+};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio_util::io::ReaderStream;
 
 use crate::error::ApiError;
 use crate::jail;
@@ -22,6 +26,7 @@ pub fn router() -> Router<AppState> {
         .route("/files", get(list))
         .route("/files/mkdir", post(mkdir))
         .route("/files/rename", post(rename))
+        .route("/files/copy", post(copy))
         .route("/files/delete", post(delete))
         .route("/files/upload", post(upload))
         .route("/files/download", get(download))
@@ -32,6 +37,8 @@ pub struct PathQuery {
     pub root: Option<String>,
     #[serde(default)]
     pub path: String,
+    #[serde(default)]
+    pub inline: bool,
 }
 
 #[derive(Serialize)]
@@ -203,6 +210,8 @@ struct RenameIn {
     root: String,
     from: String,
     to: String,
+    #[serde(default)]
+    unique: bool,
 }
 
 async fn rename(
@@ -212,9 +221,83 @@ async fn rename(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     current_user(&state, &jar).await?;
     let from = resolve(&state, &body.root, &body.from).await?;
-    let to = resolve(&state, &body.root, &body.to).await?;
+    let mut to = resolve(&state, &body.root, &body.to).await?;
+    if to.exists() {
+        if body.unique {
+            to = unique_path(&to);
+        } else {
+            return Err(ApiError::Conflict("destination already exists".into()));
+        }
+    }
+    if from.is_dir() && to.starts_with(&from) {
+        return Err(ApiError::BadRequest("cannot move a folder into itself".into()));
+    }
     std::fs::rename(from, to)?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct CopyIn {
+    root: String,
+    from: String,
+    to: String,
+}
+
+async fn copy(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<CopyIn>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    current_user(&state, &jar).await?;
+    let from = resolve(&state, &body.root, &body.from).await?;
+    let mut to = resolve(&state, &body.root, &body.to).await?;
+    if to.exists() {
+        to = unique_path(&to);
+    }
+    if from.is_dir() && to.starts_with(&from) {
+        return Err(ApiError::BadRequest("cannot copy a folder into itself".into()));
+    }
+    tokio::task::spawn_blocking(move || copy_entry(&from, &to))
+        .await
+        .map_err(ApiError::internal)??;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+fn unique_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file");
+    let ext = path.extension().and_then(|s| s.to_str());
+    for i in 1..10_000 {
+        let name = match ext {
+            Some(ext) => format!("{stem} ({i}).{ext}"),
+            None => format!("{stem} ({i})"),
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    parent.join(format!("{stem} copy"))
+}
+
+fn copy_entry(from: &Path, to: &Path) -> std::io::Result<()> {
+    let meta = from.symlink_metadata()?;
+    if meta.is_dir() {
+        std::fs::create_dir(to)?;
+        for ent in std::fs::read_dir(from)? {
+            let ent = ent?;
+            copy_entry(&ent.path(), &to.join(ent.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
 }
 
 #[derive(Deserialize)]
@@ -291,6 +374,7 @@ async fn download(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(q): Query<PathQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     current_user(&state, &jar).await?;
     let root = q
@@ -301,19 +385,129 @@ async fn download(
     if !path.is_file() {
         return Err(ApiError::BadRequest("not a file".into()));
     }
-    let data = tokio::fs::read(&path).await?;
-    let mime = mime_guess::from_path(&path)
+    stream_file(&path, q.inline, headers.get(RANGE)).await
+}
+
+async fn stream_file(
+    path: &Path,
+    inline: bool,
+    range_header: Option<&HeaderValue>,
+) -> Result<Response, ApiError> {
+    let meta = tokio::fs::metadata(path).await?;
+    let len = meta.len();
+    let mime = mime_guess::from_path(path)
         .first_or_octet_stream()
         .to_string();
     let filename = path
         .file_name()
         .and_then(|s| s.to_str())
-        .unwrap_or("download");
-    let disp = format!("attachment; filename=\"{filename}\"");
-    Response::builder()
-        .status(StatusCode::OK)
+        .unwrap_or("download")
+        .replace(['"', '\\'], "_");
+    let disp = if inline {
+        format!("inline; filename=\"{filename}\"")
+    } else {
+        format!("attachment; filename=\"{filename}\"")
+    };
+
+    let range = if len == 0 {
+        None
+    } else {
+        parse_byte_range(range_header, len)?
+    };
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let (status, start, take) = if let Some((start, end)) = range {
+        (StatusCode::PARTIAL_CONTENT, start, end - start + 1)
+    } else {
+        (StatusCode::OK, 0, len)
+    };
+    file.seek(SeekFrom::Start(start)).await?;
+    let stream = ReaderStream::new(file.take(take));
+    let mut builder = Response::builder()
+        .status(status)
         .header(CONTENT_TYPE, mime)
         .header(CONTENT_DISPOSITION, disp)
-        .body(Body::from(data))
+        .header(ACCEPT_RANGES, "bytes")
+        .header(CONTENT_LENGTH, take.to_string());
+    if let Some((start, end)) = range {
+        builder = builder.header(CONTENT_RANGE, format!("bytes {start}-{end}/{len}"));
+    }
+    builder
+        .body(Body::from_stream(stream))
         .map_err(ApiError::internal)
+}
+
+fn parse_byte_range(
+    header: Option<&HeaderValue>,
+    len: u64,
+) -> Result<Option<(u64, u64)>, ApiError> {
+    let Some(val) = header else {
+        return Ok(None);
+    };
+    let s = val
+        .to_str()
+        .map_err(|_| ApiError::BadRequest("invalid range".into()))?;
+    let Some(spec) = s.strip_prefix("bytes=") else {
+        return Err(ApiError::BadRequest("invalid range".into()));
+    };
+    let first = spec.split(',').next().unwrap_or(spec).trim();
+    if first.is_empty() || len == 0 {
+        return Ok(None);
+    }
+    let (start, end) = if let Some(suffix) = first.strip_prefix('-') {
+        let n: u64 = suffix
+            .parse()
+            .map_err(|_| ApiError::BadRequest("invalid range".into()))?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let n = n.min(len);
+        (len - n, len - 1)
+    } else {
+        let mut parts = first.splitn(2, '-');
+        let start: u64 = parts
+            .next()
+            .unwrap_or("")
+            .parse()
+            .map_err(|_| ApiError::BadRequest("invalid range".into()))?;
+        let end = match parts.next() {
+            Some("") | None => len.saturating_sub(1),
+            Some(e) => e
+                .parse()
+                .map_err(|_| ApiError::BadRequest("invalid range".into()))?,
+        };
+        if start >= len || start > end {
+            return Err(ApiError::BadRequest("invalid range".into()));
+        }
+        (start, end.min(len.saturating_sub(1)))
+    };
+    Ok(Some((start, end)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn unique_path_appends_number() {
+        let dir = std::env::temp_dir().join(format!("coduos-unique-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("photo.jpg");
+        fs::write(&file, b"a").unwrap();
+        let next = unique_path(&file);
+        assert_eq!(next.file_name().unwrap(), "photo (1).jpg");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_range_suffix_and_span() {
+        let val = HeaderValue::from_static("bytes=2-5");
+        assert_eq!(parse_byte_range(Some(&val), 10).unwrap(), Some((2, 5)));
+        let suffix = HeaderValue::from_static("bytes=-3");
+        assert_eq!(parse_byte_range(Some(&suffix), 10).unwrap(), Some((7, 9)));
+        let open = HeaderValue::from_static("bytes=8-");
+        assert_eq!(parse_byte_range(Some(&open), 10).unwrap(), Some((8, 9)));
+        assert_eq!(parse_byte_range(None, 10).unwrap(), None);
+    }
 }

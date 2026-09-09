@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, type ApiError } from './lib/api';
-  import { appIcons, ensureIconIndex } from './lib/icons';
+  import { resumeWait } from './lib/power';
+  import { ensureIconIndex } from './lib/icons';
   import Desktop from './components/Desktop.svelte';
-  import AppWindow from './components/AppWindow.svelte';
+  import PowerOverlay from './components/PowerOverlay.svelte';
   import Setup from './pages/Setup.svelte';
   import Login from './pages/Login.svelte';
   import Apps from './pages/Apps.svelte';
@@ -33,6 +34,7 @@
     window.addEventListener('popstate', onPop);
     ensureIconIndex();
     refresh();
+    resumeWait();
     return () => window.removeEventListener('popstate', onPop);
   });
 
@@ -121,24 +123,15 @@
   {#if page.name === 'files'}
     <Files onClose={() => go('/')} />
   {:else if page.name === 'apps'}
-    <AppWindow title="Apps" icon={appIcons.apps} size="wide" onClose={() => go('/')}>
-      <Apps {go} />
-    </AppWindow>
+    <Apps {go} onClose={() => go('/')} />
   {:else if page.name === 'new'}
-    <AppWindow title="Install app" icon={appIcons.install} size="wide" onClose={() => go('/')}>
-      <AppEditor {go} />
-    </AppWindow>
+    <AppEditor {go} onClose={() => go('/')} />
   {:else if page.name === 'app'}
-    <AppWindow title="App settings" icon={appIcons.docker} size="wide" onClose={() => go('/')}>
-      <AppEditor {go} id={page.id} />
-    </AppWindow>
+    <AppEditor {go} id={page.id} onClose={() => go('/')} />
   {:else if page.name === 'settings'}
-    <AppWindow title="Settings" icon={appIcons.settings} size="xl" flush onClose={() => go('/')}>
-      <Settings pane={page.pane} {go} prefill={proxyPrefill} />
-    </AppWindow>
+    <Settings pane={page.pane} {go} prefill={proxyPrefill} onClose={() => go('/')} />
   {:else if page.name === 'tasks'}
-    <AppWindow title="Task Manager" icon={appIcons.tasks} size="wide" onClose={() => go('/')}>
-      <Tasks />
-    </AppWindow>
+    <Tasks onClose={() => go('/')} />
   {/if}
 {/if}
+<PowerOverlay />

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api';
-  import { appIcons } from '../lib/icons';
-  import Icon from '../components/Icon.svelte';
+  import UiIcon from '../components/UiIcon.svelte';
 
   let { onDone } = $props<{ onDone: () => void }>();
   let username = $state('admin');
@@ -30,7 +29,7 @@
 
 <div class="auth-wrap">
   <form class="auth-card" onsubmit={submit}>
-    <div class="auth-logo"><Icon name={appIcons.computer} size={48} alt="" /></div>
+    <div class="auth-logo"><UiIcon name="computer" size={48} /></div>
     <h1>Create your admin account</h1>
     <p>First start on this machine. Pick a username and password — CoduOS has no default login.</p>
     <label class="field"><span>Username</span><input bind:value={username} autocomplete="username" required /></label>

@@ -463,12 +463,24 @@ fn interesting_mount(mount: &Path) -> bool {
 }
 
 fn is_virtual(name: &str) -> bool {
-    name.starts_with("docker")
+    Path::new("/sys/devices/virtual/net").join(name).is_dir() || is_virtual_name(name)
+}
+
+/// Prefixes / well-known names when sysfs is missing (e.g. some containers).
+fn is_virtual_name(name: &str) -> bool {
+    name == "coduos"
+        || name == "docker0"
+        || name.starts_with("docker")
         || name.starts_with("br-")
         || name.starts_with("veth")
         || name.starts_with("virbr")
         || name.starts_with("cni")
         || name.starts_with("flannel")
+        || name.starts_with("wg")
+        || name.starts_with("tun")
+        || name.starts_with("tap")
+        || name.starts_with("tailscale")
+        || name.starts_with("zt")
 }
 
 fn sysfs_trim(path: &str) -> String {
@@ -758,4 +770,21 @@ pub fn disk_usage_by_mount(mount: &str) -> Option<(u64, u64)> {
             None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_virtual_name;
+
+    #[test]
+    fn vpn_and_docker_are_virtual() {
+        assert!(is_virtual_name("coduos"));
+        assert!(is_virtual_name("docker0"));
+        assert!(is_virtual_name("br-abc"));
+        assert!(is_virtual_name("veth1234"));
+        assert!(is_virtual_name("wg0"));
+        assert!(!is_virtual_name("enp4s0"));
+        assert!(!is_virtual_name("wlp0s20f3"));
+        assert!(!is_virtual_name("eth0"));
+    }
 }

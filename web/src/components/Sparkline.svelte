@@ -1,10 +1,25 @@
 <script lang="ts">
-  let { rx = [], tx = [] } = $props<{ rx?: number[]; tx?: number[] }>();
+  import { bps } from '../lib/format';
+
+  let { rx = [], tx = [], showScale = false } = $props<{
+    rx?: number[];
+    tx?: number[];
+    showScale?: boolean;
+  }>();
 
   const w = 80;
   const h = 40;
 
-  let max = $derived(Math.max(1, ...rx, ...tx));
+  function niceMax(n: number): number {
+    if (!Number.isFinite(n) || n <= 1) return 1;
+    const exp = Math.floor(Math.log10(n));
+    const base = 10 ** exp;
+    const m = n / base;
+    const nice = m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10;
+    return nice * base;
+  }
+
+  let max = $derived(niceMax(Math.max(1, ...rx, ...tx)));
 
   function pts(vals: number[]) {
     if (vals.length < 2) {
@@ -24,8 +39,13 @@
   let rxFill = $derived(`0,${h} ${rxPts} ${w},${h}`);
 </script>
 
-<svg class="spark" viewBox="0 0 {w} {h}" preserveAspectRatio="none" aria-hidden="true">
-  <polygon points={rxFill} class="spark-fill" />
-  <polyline points={rxPts} fill="none" class="spark-rx" />
-  <polyline points={txPts} fill="none" class="spark-tx" />
-</svg>
+<div class="spark-wrap">
+  {#if showScale}
+    <span class="spark-scale">{bps(max)}</span>
+  {/if}
+  <svg class="spark" viewBox="0 0 {w} {h}" preserveAspectRatio="none" aria-hidden="true">
+    <polygon points={rxFill} class="spark-fill" />
+    <polyline points={rxPts} fill="none" class="spark-rx" />
+    <polyline points={txPts} fill="none" class="spark-tx" />
+  </svg>
+</div>

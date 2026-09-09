@@ -28,6 +28,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 export function setTheme(theme: 'light' | 'dark') {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem('coduos-theme', theme);
+  window.dispatchEvent(new Event('coduos-theme'));
 }
 
 export function toggleTheme() {

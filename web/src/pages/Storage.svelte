@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
   import { bytes, pct } from '../lib/format';
-  import Icon from '../components/Icon.svelte';
+  import UiIcon from '../components/UiIcon.svelte';
   import Confirm from '../components/Confirm.svelte';
 
   let { go } = $props<{ go: (to: string) => void }>();
@@ -220,7 +220,7 @@
 {#each internal as d}
   <div class="storage-card">
     <div class="storage-head">
-      <Icon name="disk" size={28} alt="" />
+      <UiIcon name="storage" size={28} />
       <div class="storage-ident">
         <strong>{title(d)}</strong>
         <div class="meta">{bytes(d.size)} · {d.path}{#if d.transport} · {d.transport}{/if}</div>
@@ -294,7 +294,7 @@
 {#each external as d}
   <div class="storage-card">
     <div class="storage-head">
-      <Icon name="disk" size={28} alt="" />
+      <UiIcon name="storage" size={28} />
       <div class="storage-ident">
         <strong>{title(d)}</strong>
         <div class="meta">{bytes(d.size)} · {d.path}</div>

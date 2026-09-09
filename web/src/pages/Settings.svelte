@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, isLight, setTheme } from '../lib/api';
+  import { applyPower as sendPower } from '../lib/power';
   import { batteryLabel, joinMeta } from '../lib/format';
-  import { appIcons } from '../lib/icons';
-  import Icon from '../components/Icon.svelte';
+  import UiIcon from '../components/UiIcon.svelte';
+  import AppWindow from '../components/AppWindow.svelte';
   import Confirm from '../components/Confirm.svelte';
   import Storage from './Storage.svelte';
   import Network from './Network.svelte';
@@ -15,11 +16,13 @@
   let {
     pane = 'general',
     go,
-    prefill
+    prefill,
+    onClose
   } = $props<{
     pane?: string;
     go: (to: string) => void;
     prefill?: { hostname?: string; port?: number; app_id?: string };
+    onClose: () => void;
   }>();
 
   type Root = { id: string; label: string; path: string };
@@ -79,12 +82,12 @@
 
   const nav = [
     { id: 'general', label: 'General', icon: 'settings' },
-    { id: 'storage', label: 'Storage', icon: appIcons.storage },
-    { id: 'network', label: 'Network', icon: appIcons.network },
-    { id: 'vpn', label: 'VPN', icon: appIcons.vpn },
-    { id: 'ddns', label: 'DDNS', icon: appIcons.ddns },
-    { id: 'proxy', label: 'Proxy', icon: appIcons.proxy },
-    { id: 'services', label: 'Services', icon: appIcons.services }
+    { id: 'storage', label: 'Storage', icon: 'storage' },
+    { id: 'network', label: 'Network', icon: 'network' },
+    { id: 'vpn', label: 'VPN', icon: 'vpn' },
+    { id: 'ddns', label: 'DDNS', icon: 'ddns' },
+    { id: 'proxy', label: 'Proxy', icon: 'proxy' },
+    { id: 'services', label: 'Services', icon: 'services' }
   ];
 
   let settings = $state<Settings | null>(null);
@@ -259,8 +262,7 @@
     powerBusy = action;
     powerConfirm = null;
     try {
-      await api('/api/system/power', { method: 'POST', body: JSON.stringify({ action }) });
-      notice = action === 'reboot' ? 'Rebooting…' : 'Shutting down…';
+      await sendPower(action);
     } catch (err: any) {
       error = err.message;
       powerBusy = '';
@@ -268,11 +270,12 @@
   }
 </script>
 
+<AppWindow title="Settings" icon="settings" size="sheet" flush {onClose}>
 <div class="set-shell">
   <nav class="set-nav" aria-label="Settings">
     {#each nav as n}
       <button class="loc" class:active={active === n.id} onclick={() => go(href(n.id))}>
-        <Icon name={n.icon} size={20} alt="" />
+        <UiIcon name={n.icon} size={20} />
         {n.label}
       </button>
     {/each}
@@ -285,8 +288,12 @@
       <section class="set-block">
         <h3>Appearance</h3>
         <div class="segment">
-          <button class="btn secondary" class:active={!light} onclick={() => theme('dark')}>Dark</button>
-          <button class="btn secondary" class:active={light} onclick={() => theme('light')}>Light</button>
+          <button class="btn secondary" class:active={!light} onclick={() => theme('dark')}>
+            <UiIcon name="dark_mode" size={18} /> Dark
+          </button>
+          <button class="btn secondary" class:active={light} onclick={() => theme('light')}>
+            <UiIcon name="light_mode" size={18} /> Light
+          </button>
         </div>
       </section>
 
@@ -416,7 +423,7 @@
             </div>
           </form>
         {:else}
-          <button class="btn" onclick={() => (addingRoot = true)}>Add location</button>
+          <button class="btn secondary" onclick={() => (addingRoot = true)}>Add location</button>
         {/if}
       </section>
 
@@ -470,6 +477,7 @@
             disabled={!settings?.privileged || !!powerBusy}
             onclick={() => (powerConfirm = 'reboot')}
           >
+            <UiIcon name="power" size={18} />
             {powerBusy === 'reboot' ? 'Rebooting…' : 'Reboot'}
           </button>
           <button
@@ -477,6 +485,7 @@
             disabled={!settings?.privileged || !!powerBusy}
             onclick={() => (powerConfirm = 'shutdown')}
           >
+            <UiIcon name="power" size={18} />
             {powerBusy === 'shutdown' ? 'Shutting down…' : 'Shut down'}
           </button>
         </div>
@@ -509,6 +518,7 @@
     {/if}
   </div>
 </div>
+</AppWindow>
 
 {#if confirmUpdate && update?.latest}
   <Confirm
