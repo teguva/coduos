@@ -1,15 +1,15 @@
 [Unit]
 Description=CoduOS dashboard
 Documentation=https://github.com/teguva/coduos
-After=network-online.target docker.service
-Before=nginx.service
-Wants=network-online.target
+# Bind is loopback (nginx in front). Do not wait for Docker or "network online"
+# — either one can stall boot for minutes or skip the dashboard entirely.
+After=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/coduosd --config /etc/coduos/coduos.toml
-Restart=on-failure
-RestartSec=3
+Restart=always
+RestartSec=2
 TimeoutStopSec=20
 # No CAP_NET_ADMIN. WireGuard and nginx are reloaded via allowlisted units.
 

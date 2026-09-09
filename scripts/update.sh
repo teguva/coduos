@@ -87,7 +87,14 @@ if [[ -f "${root}/usr/lib/systemd/system/coduos-wg.service" ]]; then
 fi
 
 systemctl daemon-reload
-systemctl restart coduosd.service
+systemctl enable coduosd.service
+if ! systemctl restart coduosd.service; then
+  systemctl start coduosd.service
+fi
+if command -v nginx >/dev/null 2>&1 && [[ -f /etc/nginx/conf.d/coduos.conf || -d /var/lib/coduos/nginx/conf.d ]]; then
+  systemctl enable nginx.service 2>/dev/null || systemctl enable nginx 2>/dev/null || true
+  systemctl start nginx.service 2>/dev/null || systemctl start nginx 2>/dev/null || true
+fi
 
 after=$(/usr/bin/coduosd --version 2>/dev/null | awk '{print $NF}' || echo "${ver}")
 echo
