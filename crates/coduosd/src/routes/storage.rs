@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::storage::{self, Inventory, Partition, UnmountResult};
+use crate::storage::{self, Inventory, MountOpts, Partition, UnmountResult};
 
 use super::current_user;
 
@@ -34,17 +34,34 @@ struct DeviceIn {
     device: String,
 }
 
+#[derive(Deserialize)]
+struct MountIn {
+    device: String,
+    folder: Option<String>,
+    files_name: Option<String>,
+    add_to_files: Option<bool>,
+    auto_mount: Option<bool>,
+    read_only: Option<bool>,
+}
+
 async fn mount(
     State(state): State<AppState>,
     jar: CookieJar,
-    Json(body): Json<DeviceIn>,
+    Json(body): Json<MountIn>,
 ) -> Result<Json<Partition>, ApiError> {
     current_user(&state, &jar).await?;
     let mut cfg = state.config.write().await;
-    Ok(Json(storage::mount_device(
+    Ok(Json(storage::mount_device_with(
         &mut cfg,
         &state.config_path,
         &body.device,
+        &MountOpts {
+            folder: body.folder,
+            files_label: body.files_name,
+            add_to_files: body.add_to_files.unwrap_or(true),
+            auto_mount: body.auto_mount.unwrap_or(true),
+            read_only: body.read_only.unwrap_or(false),
+        },
     )?))
 }
 

@@ -18,6 +18,7 @@ use tokio_util::io::ReaderStream;
 use crate::error::ApiError;
 use crate::jail;
 use crate::state::AppState;
+use crate::storage;
 
 use super::current_user;
 
@@ -78,6 +79,9 @@ async fn resolve(state: &AppState, root_id: &str, rel: &str) -> Result<PathBuf, 
     let root = cfg
         .file_root(root_id)
         .ok_or(ApiError::BadRequest("unknown file root".into()))?;
+    if !storage::file_root_available(&root.path) {
+        return Err(ApiError::BadRequest("this location is not mounted".into()));
+    }
     jail::resolve_in_root(&root.path, rel)
 }
 
@@ -91,6 +95,7 @@ async fn list(
     let roots: Vec<RootOut> = cfg
         .file_roots
         .iter()
+        .filter(|r| storage::file_root_available(&r.path))
         .map(|r| RootOut {
             id: r.id.clone(),
             label: r.label.clone(),
@@ -114,6 +119,16 @@ async fn list(
     let root = cfg
         .file_root(&root_id)
         .ok_or(ApiError::BadRequest("unknown file root".into()))?;
+    if !storage::file_root_available(&root.path) {
+        return Ok(Json(ListOut {
+            root: String::new(),
+            path: String::new(),
+            roots,
+            entries: vec![],
+            favorites,
+            space: None,
+        }));
+    }
     let dir = jail::resolve_in_root(&root.path, &q.path)?;
     drop(cfg);
     if !dir.is_dir() {

@@ -65,6 +65,10 @@ fn is_true(v: &bool) -> bool {
     *v
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageMount {
     pub uuid: String,
@@ -76,6 +80,8 @@ pub struct StorageMount {
     /// Remount this volume when the daemon starts. Missing from older configs = true.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub auto_mount: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

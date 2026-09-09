@@ -9,6 +9,63 @@ use crate::util::{self, privileged, safe_label};
 
 const MEDIA_ROOT: &str = "/media/coduos";
 
+fn normalize_mount_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    let s = s.trim_end_matches('/');
+    if s.is_empty() {
+        "/".into()
+    } else {
+        s.to_string()
+    }
+}
+
+fn unescape_proc_mount(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            let oct = &s[i + 1..i + 4];
+            if let Ok(n) = u8::from_str_radix(oct, 8) {
+                out.push(n as char);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+pub fn parse_proc_mounts(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let mp = line.split_whitespace().nth(1)?;
+            let mp = unescape_proc_mount(mp);
+            Some(normalize_mount_path(Path::new(&mp)))
+        })
+        .collect()
+}
+
+pub fn is_path_mounted(path: &Path) -> bool {
+    let want = normalize_mount_path(path);
+    parse_proc_mounts(&std::fs::read_to_string("/proc/mounts").unwrap_or_default())
+        .iter()
+        .any(|m| m == &want)
+}
+
+/// Built-in locations stay visible. Extra volumes only appear while they are mounted.
+pub fn file_root_available(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    if path == Path::new("/") || path == Path::new("/home") {
+        return true;
+    }
+    is_path_mounted(path)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Inventory {
     pub privileged: bool,
@@ -45,6 +102,8 @@ pub struct Partition {
     pub total: Option<u64>,
     pub health: Option<String>,
     pub in_files: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_label: Option<String>,
     pub auto_mount: bool,
 }
 
@@ -247,6 +306,10 @@ fn to_partition(
     let auto_mount = persisted
         .iter()
         .any(|m| !uuid.is_empty() && m.uuid == uuid && m.auto_mount);
+    let files_root = roots.iter().find(|r| {
+        let rp = r.path.display().to_string();
+        rp == mount || (!mount.is_empty() && mount != "/" && r.path.starts_with(&mount))
+    });
     Partition {
         name: opt_str(&dev.name),
         path: path.clone(),
@@ -261,13 +324,8 @@ fn to_partition(
         used,
         total,
         health: None,
-        in_files: roots.iter().any(|r| {
-            if mount.is_empty() || mount == "/" {
-                return r.path.display().to_string() == mount;
-            }
-            let rp = r.path.display().to_string();
-            rp == mount || r.path.starts_with(&mount)
-        }),
+        in_files: files_root.is_some(),
+        files_label: files_root.map(|r| r.label.clone()),
         auto_mount,
     }
 }
@@ -410,19 +468,52 @@ fn refuse_disk(disk: &Disk) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn mount_opts(fstype: &str) -> String {
-    let base = "nosuid,nodev,noexec";
+fn mount_opts(fstype: &str, read_only: bool) -> String {
+    let mut base = String::from("nosuid,nodev,noexec");
+    if read_only {
+        base.push_str(",ro");
+    }
     match fstype.to_ascii_lowercase().as_str() {
         "vfat" | "fat" | "fat32" | "exfat" | "ntfs" | "ntfs3" | "msdos" => {
             let uid = unsafe { libc::geteuid() };
             let gid = unsafe { libc::getegid() };
             format!("{base},uid={uid},gid={gid}")
         }
-        _ => base.into(),
+        _ => base,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MountOpts {
+    pub folder: Option<String>,
+    pub files_label: Option<String>,
+    pub add_to_files: bool,
+    pub auto_mount: bool,
+    pub read_only: bool,
+}
+
+impl Default for MountOpts {
+    fn default() -> Self {
+        Self {
+            folder: None,
+            files_label: None,
+            add_to_files: false,
+            auto_mount: true,
+            read_only: false,
+        }
     }
 }
 
 pub fn mount_device(cfg: &mut Config, config_path: &Path, device: &str) -> Result<Partition, ApiError> {
+    mount_device_with(cfg, config_path, device, &MountOpts::default())
+}
+
+pub fn mount_device_with(
+    cfg: &mut Config,
+    config_path: &Path,
+    device: &str,
+    opts: &MountOpts,
+) -> Result<Partition, ApiError> {
     util::require_privileged()?;
     let inv = inventory(cfg)?;
     let (disk, part) = find_part(&inv, device).ok_or(ApiError::NotFound)?;
@@ -434,23 +525,48 @@ pub fn mount_device(cfg: &mut Config, config_path: &Path, device: &str) -> Resul
     if part.uuid.is_empty() {
         return Err(ApiError::BadRequest("device has no UUID; cannot persist a mount".into()));
     }
-    let label = if part.label.is_empty() {
+    let fallback = if part.label.is_empty() {
         safe_label(&part.uuid)
     } else {
         safe_label(&part.label)
     };
-    let dest = PathBuf::from(MEDIA_ROOT).join(&label);
+    let folder = match opts.folder.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => safe_label(raw),
+        None => cfg
+            .storage_mounts
+            .iter()
+            .find(|m| m.uuid == part.uuid)
+            .and_then(|m| {
+                m.mountpoint
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or(fallback),
+    };
+    let dest = PathBuf::from(MEDIA_ROOT).join(&folder);
+    if is_path_mounted(&dest) {
+        return Err(ApiError::BadRequest(format!(
+            "{} is already in use as a mount point",
+            dest.display()
+        )));
+    }
     std::fs::create_dir_all(&dest)
         .map_err(|e| ApiError::BadRequest(format!("could not create mount point: {e}")))?;
-    let opts = mount_opts(&part.fstype);
+    let opts_str = mount_opts(&part.fstype, opts.read_only);
     let src = format!("UUID={}", part.uuid);
-    util::run_ok("mount", &["-o", &opts, &src, &dest.display().to_string()])?;
-    let auto_mount = cfg
-        .storage_mounts
-        .iter()
-        .find(|m| m.uuid == part.uuid)
-        .map(|m| m.auto_mount)
-        .unwrap_or(true);
+    util::run_ok("mount", &["-o", &opts_str, &src, &dest.display().to_string()])?;
+    let files_label = opts
+        .files_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(if part.label.is_empty() {
+            folder.as_str()
+        } else {
+            part.label.as_str()
+        })
+        .to_string();
     upsert_storage_mount(
         cfg,
         StorageMount {
@@ -458,13 +574,24 @@ pub fn mount_device(cfg: &mut Config, config_path: &Path, device: &str) -> Resul
             mountpoint: dest.clone(),
             device: part.path.clone(),
             label: part.label.clone(),
-            auto_mount,
+            auto_mount: opts.auto_mount,
+            read_only: opts.read_only,
         },
     );
     cfg.save(config_path)
         .map_err(|e| ApiError::BadRequest(format!("could not persist mount: {e}")))?;
+    if opts.add_to_files {
+        let _ = add_path_to_files(cfg, config_path, &dest.display().to_string(), &files_label);
+    }
     let mut out = part.clone();
     out.mountpoint = dest.display().to_string();
+    out.auto_mount = opts.auto_mount;
+    out.in_files = opts.add_to_files;
+    out.files_label = if opts.add_to_files {
+        Some(files_label)
+    } else {
+        None
+    };
     Ok(out)
 }
 
@@ -513,6 +640,14 @@ pub fn unmount_device(
         }
     }
     cfg.storage_mounts.retain(|m| m.uuid != uuid && m.mountpoint.display().to_string() != mp);
+    let drop_ids: Vec<String> = cfg
+        .file_roots
+        .iter()
+        .filter(|r| r.path.display().to_string() == mp)
+        .map(|r| r.id.clone())
+        .collect();
+    cfg.file_roots.retain(|r| r.path.display().to_string() != mp);
+    cfg.file_favorites.retain(|f| !drop_ids.iter().any(|id| id == &f.root));
     let _ = cfg.save(config_path);
     Ok(UnmountResult {
         ok: true,
@@ -564,18 +699,36 @@ pub fn add_to_files(cfg: &mut Config, config_path: &Path, device: &str) -> Resul
     if part.system && (part.mountpoint == "/" || part.mountpoint == "/usr") {
         return Err(ApiError::BadRequest("the system disk is already available as a location if configured".into()));
     }
+    let label = if part.label.is_empty() {
+        part.name.clone()
+    } else {
+        part.label.clone()
+    };
+    add_path_to_files(cfg, config_path, &part.mountpoint, &label)
+}
+
+fn add_path_to_files(
+    cfg: &mut Config,
+    config_path: &Path,
+    mountpoint: &str,
+    files_label: &str,
+) -> Result<FileRoot, ApiError> {
     if let Some(existing) = cfg
         .file_roots
-        .iter()
-        .find(|r| r.path.display().to_string() == part.mountpoint)
+        .iter_mut()
+        .find(|r| r.path.display().to_string() == mountpoint)
     {
+        let label = files_label.trim();
+        if !label.is_empty() && existing.label != label {
+            existing.label = label.to_string();
+            let root = existing.clone();
+            cfg.save(config_path)
+                .map_err(|e| ApiError::BadRequest(format!("could not save files location: {e}")))?;
+            return Ok(root);
+        }
         return Ok(existing.clone());
     }
-    let mut id = if part.label.is_empty() {
-        safe_label(&part.uuid)
-    } else {
-        safe_label(&part.label)
-    };
+    let mut id = safe_label(files_label);
     if !valid_id(&id) {
         id = format!("disk-{id}");
         id = crate::config::slugify(&id);
@@ -588,12 +741,12 @@ pub fn add_to_files(cfg: &mut Config, config_path: &Path, device: &str) -> Resul
     }
     let root = FileRoot {
         id: candidate,
-        label: if part.label.is_empty() {
-            part.name.clone()
+        label: if files_label.trim().is_empty() {
+            id
         } else {
-            part.label.clone()
+            files_label.trim().to_string()
         },
-        path: PathBuf::from(&part.mountpoint),
+        path: PathBuf::from(mountpoint),
     };
     cfg.file_roots.push(root.clone());
     cfg.save(config_path)
@@ -777,6 +930,7 @@ pub fn set_auto_mount(
         std::fs::create_dir_all(&dest)
             .map_err(|e| ApiError::BadRequest(format!("could not create mount point: {e}")))?;
     }
+    let read_only = existing.as_ref().map(|m| m.read_only).unwrap_or(false);
     upsert_storage_mount(
         cfg,
         StorageMount {
@@ -785,6 +939,7 @@ pub fn set_auto_mount(
             device: part.path.clone(),
             label: part.label.clone(),
             auto_mount: enabled,
+            read_only,
         },
     );
     cfg.save(config_path)
@@ -819,7 +974,12 @@ pub fn remount_persisted(cfg: &Config) {
         }
         let dest = m.mountpoint.display().to_string();
         let src = format!("UUID={}", m.uuid);
-        match util::run("mount", &["-o", "nosuid,nodev,noexec", &src, &dest]) {
+        let opts = if m.read_only {
+            "nosuid,nodev,noexec,ro"
+        } else {
+            "nosuid,nodev,noexec"
+        };
+        match util::run("mount", &["-o", opts, &src, &dest]) {
             Ok(out) if out.status.success() => {
                 tracing::info!("remounted {} at {dest}", m.uuid);
             }
@@ -880,6 +1040,7 @@ mod tests {
             total: None,
             health: None,
             in_files: false,
+            files_label: None,
             auto_mount: false,
         };
         assert_eq!(persist_dest(&part, None), PathBuf::from("/mnt/backup"));
@@ -905,5 +1066,34 @@ mod tests {
         )
         .unwrap();
         assert!(!off.auto_mount);
+    }
+
+    #[test]
+    fn mount_opts_fat_and_readonly() {
+        let ext = mount_opts("ext4", false);
+        assert!(ext.contains("nosuid"));
+        assert!(!ext.split(',').any(|p| p == "ro"));
+        assert!(mount_opts("ext4", true).split(',').any(|p| p == "ro"));
+        assert!(mount_opts("exfat", false).contains("uid="));
+    }
+
+    #[test]
+    fn parse_proc_mounts_unescapes_and_skips_unmounted() {
+        let text = "\
+/dev/sda1 / ext4 rw 0 0
+/dev/sdb1 /media/coduos/backup ext4 rw 0 0
+/dev/sdc1 /mnt/data\\040disk xfs rw 0 0
+";
+        let mounts = parse_proc_mounts(text);
+        assert!(mounts.iter().any(|m| m == "/"));
+        assert!(mounts.iter().any(|m| m == "/media/coduos/backup"));
+        assert!(mounts.iter().any(|m| m == "/mnt/data disk"));
+        assert!(!mounts.iter().any(|m| m == "/media/coduos/old"));
+    }
+
+    #[test]
+    fn extra_volume_roots_need_a_live_mount() {
+        assert!(file_root_available(Path::new("/")));
+        assert!(!file_root_available(Path::new("/media/coduos/does-not-exist")));
     }
 }

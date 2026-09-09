@@ -97,7 +97,7 @@
       target.root = data.root || data.roots[0]?.id || '';
       target.path = data.path;
       target.error = '';
-      if (data.roots?.length) roots = data.roots;
+      if (data.roots) roots = data.roots;
       favorites = data.favorites ?? favorites;
       const keep = new Set((data.entries ?? []).map((e) => e.path));
       target.selected = new Set([...target.selected].filter((p) => keep.has(p)));

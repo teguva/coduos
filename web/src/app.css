@@ -1586,6 +1586,13 @@ details.advanced[open] > summary::before { content: "▾ "; }
   font-size: 13px;
   color: var(--muted);
 }
+.mount-path {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  margin: -6px 0 14px;
+  word-break: break-all;
+}
 .confirm-bg {
   position: fixed;
   inset: 0;

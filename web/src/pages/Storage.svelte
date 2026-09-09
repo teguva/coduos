@@ -3,6 +3,7 @@
   import { api } from '../lib/api';
   import { bytes, pct } from '../lib/format';
   import UiIcon from '../components/UiIcon.svelte';
+  import InfoTip from '../components/InfoTip.svelte';
   import Confirm from '../components/Confirm.svelte';
 
   let { go } = $props<{ go: (to: string) => void }>();
@@ -21,6 +22,7 @@
     total?: number | null;
     health?: string | null;
     in_files: boolean;
+    files_label?: string | null;
     auto_mount: boolean;
   };
   type Disk = {
@@ -45,6 +47,18 @@
   let formatDlg = $state<{ device: string; title: string } | null>(null);
   let fmtFs = $state('ext4');
   let fmtLabel = $state('');
+  let mountDlg = $state<{
+    device: string;
+    title: string;
+    fstype: string;
+    uuid: string;
+    size: number;
+  } | null>(null);
+  let mntFolder = $state('');
+  let mntFilesName = $state('');
+  let mntAddFiles = $state(true);
+  let mntAuto = $state(true);
+  let mntRo = $state(false);
 
   async function load() {
     inv = await api<Inventory>('/api/storage');
@@ -117,10 +131,41 @@
     return kind !== 'swap' && kind !== 'efi' && kind !== 'boot' && kind !== 'system';
   }
 
-  function displayMount(p: Partition, d: Disk) {
-    const kind = role(p, d);
+  function folderSlug(s: string) {
+    const out = s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 48);
+    return out || 'disk';
+  }
+
+  function mountPath() {
+    return '/media/coduos/' + folderSlug(mntFolder || 'disk');
+  }
+
+  function openMount(p: Partition) {
+    mntFolder = folderSlug(p.label || p.name || 'disk');
+    mntFilesName = p.label || p.name || 'Disk';
+    mntAddFiles = true;
+    mntAuto = p.auto_mount !== false;
+    mntRo = false;
+    mountDlg = {
+      device: p.path,
+      title: p.label || p.name,
+      fstype: p.fstype,
+      uuid: p.uuid,
+      size: p.size
+    };
+  }
+
+  function displayWhere(p: Partition, kind: Role) {
     if (kind === 'swap') return 'Swap';
-    return p.mountpoint;
+    const bits: string[] = [];
+    if (p.mountpoint) bits.push(`Mounted at ${p.mountpoint}`);
+    if (p.files_label) bits.push(`in Files as ${p.files_label}`);
+    else if (p.in_files) bits.push('in Files');
+    return bits.join(' · ');
   }
 
   async function setAuto(device: string, enabled: boolean) {
@@ -139,11 +184,24 @@
     }
   }
 
-  async function mount(device: string) {
+  async function doMount() {
+    if (!mountDlg) return;
+    const device = mountDlg.device;
     error = '';
     busy = device;
     try {
-      await api('/api/storage/mount', { method: 'POST', body: JSON.stringify({ device }) });
+      await api('/api/storage/mount', {
+        method: 'POST',
+        body: JSON.stringify({
+          device,
+          folder: folderSlug(mntFolder || 'disk'),
+          files_name: mntFilesName.trim() || undefined,
+          add_to_files: mntAddFiles,
+          auto_mount: mntAuto,
+          read_only: mntRo
+        })
+      });
+      mountDlg = null;
       await load();
     } catch (e: any) {
       error = e.message;
@@ -227,6 +285,7 @@
       removable: true,
       system: false,
       in_files: false,
+      files_label: null,
       auto_mount: false
     };
   }
@@ -273,9 +332,9 @@
           </div>
           {#if showUsage(p, d)}
             <div class="bar"><i style="width:{pct(used, total)}%"></i></div>
-            <div class="meta">{displayMount(p, d)} · {bytes(used)} / {bytes(total)}</div>
+            <div class="meta">{displayWhere(p, kind)} · {bytes(used)} / {bytes(total)}</div>
           {:else if p.mountpoint}
-            <div class="meta">{displayMount(p, d)}</div>
+            <div class="meta">{displayWhere(p, kind)}</div>
           {/if}
           {#if canAutoMount(p, d)}
             <label class="toggle-row storage-auto">
@@ -299,7 +358,7 @@
                 <button class="btn compact secondary" onclick={() => useInFiles(p.path)}>Use in Files</button>
               {/if}
             {:else if kind !== 'swap'}
-              <button class="btn compact" disabled={!inv?.privileged || busy === p.path} onclick={() => mount(p.path)}>Mount</button>
+              <button class="btn compact" disabled={!inv?.privileged || busy === p.path} onclick={() => openMount(p)}>Mount</button>
             {/if}
             <button class="btn compact danger" disabled={!inv?.privileged || busy === p.path || busy === d.path} onclick={() => openFormat(p.path === d.path ? d.path : p.path, p.label || p.name, p.label)}>Format</button>
           </div>
@@ -352,7 +411,9 @@
           </div>
           {#if showUsage(p, d)}
             <div class="bar"><i style="width:{pct(used, total)}%"></i></div>
-            <div class="meta">{displayMount(p, d)} · {bytes(used)} / {bytes(total)}</div>
+            <div class="meta">{displayWhere(p, kind)} · {bytes(used)} / {bytes(total)}</div>
+          {:else if p.mountpoint}
+            <div class="meta">{displayWhere(p, kind)}</div>
           {/if}
           {#if canAutoMount(p, d)}
             <label class="toggle-row storage-auto">
@@ -376,7 +437,7 @@
                 <button class="btn compact" onclick={() => useInFiles(p.path)}>Use in Files</button>
               {/if}
             {:else if kind !== 'swap'}
-              <button class="btn compact" disabled={!inv?.privileged || busy === p.path} onclick={() => mount(p.path)}>Mount</button>
+              <button class="btn compact" disabled={!inv?.privileged || busy === p.path} onclick={() => openMount(p)}>Mount</button>
             {/if}
             <button class="btn compact danger" disabled={!inv?.privileged || busy === p.path || busy === d.path} onclick={() => openFormat(p.path === d.path ? d.path : p.path, p.label || p.name, p.label)}>Format</button>
           {:else if p.mountpoint}
@@ -407,11 +468,55 @@
   />
 {/if}
 
+{#if mountDlg}
+  <div class="confirm-bg" role="presentation" onclick={(e) => { if (e.currentTarget === e.target) mountDlg = null; }}>
+    <div class="confirm-card" role="dialog" aria-label="Mount drive">
+      <h3>Mount {mountDlg.title}</h3>
+      <p>
+        {mountDlg.device}{#if mountDlg.fstype} · {mountDlg.fstype}{/if} · {bytes(mountDlg.size)}
+        {#if mountDlg.uuid}<br />UUID {mountDlg.uuid}{/if}
+      </p>
+      <label class="field">
+        <span class="field-head">
+          Folder name
+          <InfoTip
+            label="Where this mounts"
+            text="CoduOS mounts by UUID under /media/coduos so the same disk keeps this folder after reboot, even if the /dev name changes."
+          />
+        </span>
+        <input bind:value={mntFolder} placeholder="backup" />
+      </label>
+      <div class="mount-path">{mountPath()}</div>
+      <label class="field">
+        <span>Name in Files</span>
+        <input bind:value={mntFilesName} placeholder="Backup" disabled={!mntAddFiles} />
+      </label>
+      <label class="toggle-row">
+        <span>Show in Files</span>
+        <input type="checkbox" bind:checked={mntAddFiles} />
+      </label>
+      <label class="toggle-row">
+        <span>Mount at startup</span>
+        <input type="checkbox" bind:checked={mntAuto} />
+      </label>
+      <label class="toggle-row">
+        <span>Read only</span>
+        <input type="checkbox" bind:checked={mntRo} />
+      </label>
+      <p>Linux filesystems keep their own permissions. FAT, exFAT, and NTFS are mounted so the CoduOS user can write.</p>
+      <div class="row">
+        <button class="btn secondary" onclick={() => (mountDlg = null)}>Cancel</button>
+        <button class="btn" disabled={!!busy} onclick={doMount}>Mount</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if formatDlg}
   <div class="confirm-bg" role="presentation" onclick={(e) => { if (e.currentTarget === e.target) formatDlg = null; }}>
     <div class="confirm-card" role="dialog" aria-label="Format drive">
       <h3>Format {formatDlg.title}?</h3>
-      <p class="danger-text">This erases everything on {formatDlg.device}. The volume is then mounted for Files.</p>
+      <p class="danger-text">This erases everything on {formatDlg.device}. CoduOS then mounts it at /media/coduos/{folderSlug(fmtLabel || 'data')}.</p>
       <label class="field"><span>Filesystem</span>
         <select bind:value={fmtFs}>
           <option value="ext4">ext4 (Linux)</option>
