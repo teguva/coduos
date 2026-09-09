@@ -45,6 +45,7 @@ pub struct Partition {
     pub total: Option<u64>,
     pub health: Option<String>,
     pub in_files: bool,
+    pub auto_mount: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,7 +222,13 @@ fn partition_node(disk: &str) -> String {
     }
 }
 
-fn to_partition(dev: &LsblkDev, removable: bool, data_dir: &Path, roots: &[FileRoot]) -> Partition {
+fn to_partition(
+    dev: &LsblkDev,
+    removable: bool,
+    data_dir: &Path,
+    roots: &[FileRoot],
+    persisted: &[StorageMount],
+) -> Partition {
     let mounts = mounts_of(dev);
     let mount = preferred_mount(&mounts);
     let fstype = opt_str(&dev.fstype);
@@ -236,13 +243,17 @@ fn to_partition(dev: &LsblkDev, removable: bool, data_dir: &Path, roots: &[FileR
             .unwrap_or((None, None))
     };
     let path = dev_path(dev);
+    let uuid = opt_str(&dev.uuid);
+    let auto_mount = persisted
+        .iter()
+        .any(|m| !uuid.is_empty() && m.uuid == uuid && m.auto_mount);
     Partition {
         name: opt_str(&dev.name),
         path: path.clone(),
         size: json_u64(&dev.size),
         fstype,
         label: opt_str(&dev.label),
-        uuid: opt_str(&dev.uuid),
+        uuid,
         mountpoint: mount.clone(),
         removable,
         system,
@@ -257,6 +268,7 @@ fn to_partition(dev: &LsblkDev, removable: bool, data_dir: &Path, roots: &[FileR
             let rp = r.path.display().to_string();
             rp == mount || r.path.starts_with(&mount)
         }),
+        auto_mount,
     }
 }
 
@@ -320,10 +332,22 @@ pub fn inventory(cfg: &Config) -> Result<Inventory, ApiError> {
         if let Some(children) = &dev.children {
             for ch in children {
                 let ch_rm = is_removable(ch, &tran, removable);
-                parts.push(to_partition(ch, ch_rm, &cfg.data_dir, &cfg.file_roots));
+                parts.push(to_partition(
+                    ch,
+                    ch_rm,
+                    &cfg.data_dir,
+                    &cfg.file_roots,
+                    &cfg.storage_mounts,
+                ));
             }
         } else if !opt_str(&dev.fstype).is_empty() || !opt_str(&dev.mountpoint).is_empty() {
-            parts.push(to_partition(&dev, removable, &cfg.data_dir, &cfg.file_roots));
+            parts.push(to_partition(
+                &dev,
+                removable,
+                &cfg.data_dir,
+                &cfg.file_roots,
+                &cfg.storage_mounts,
+            ));
         }
         if (kind == "rom" || removable) && json_u64(&dev.size) == 0 && parts.is_empty() {
             continue;
@@ -421,13 +445,22 @@ pub fn mount_device(cfg: &mut Config, config_path: &Path, device: &str) -> Resul
     let opts = mount_opts(&part.fstype);
     let src = format!("UUID={}", part.uuid);
     util::run_ok("mount", &["-o", &opts, &src, &dest.display().to_string()])?;
-    cfg.storage_mounts.retain(|m| m.uuid != part.uuid);
-    cfg.storage_mounts.push(StorageMount {
-        uuid: part.uuid.clone(),
-        mountpoint: dest.clone(),
-        device: part.path.clone(),
-        label: part.label.clone(),
-    });
+    let auto_mount = cfg
+        .storage_mounts
+        .iter()
+        .find(|m| m.uuid == part.uuid)
+        .map(|m| m.auto_mount)
+        .unwrap_or(true);
+    upsert_storage_mount(
+        cfg,
+        StorageMount {
+            uuid: part.uuid.clone(),
+            mountpoint: dest.clone(),
+            device: part.path.clone(),
+            label: part.label.clone(),
+            auto_mount,
+        },
+    );
     cfg.save(config_path)
         .map_err(|e| ApiError::BadRequest(format!("could not persist mount: {e}")))?;
     let mut out = part.clone();
@@ -689,12 +722,88 @@ pub fn format_and_mount(
     mount_device(cfg, config_path, &part.path)
 }
 
+fn upsert_storage_mount(cfg: &mut Config, mount: StorageMount) {
+    if let Some(existing) = cfg.storage_mounts.iter_mut().find(|m| m.uuid == mount.uuid) {
+        *existing = mount;
+    } else {
+        cfg.storage_mounts.push(mount);
+    }
+}
+
+fn persist_dest(part: &Partition, existing: Option<&StorageMount>) -> PathBuf {
+    if !part.mountpoint.is_empty() {
+        return PathBuf::from(&part.mountpoint);
+    }
+    if let Some(m) = existing {
+        return m.mountpoint.clone();
+    }
+    let slug = if part.label.is_empty() {
+        safe_label(&part.uuid)
+    } else {
+        safe_label(&part.label)
+    };
+    PathBuf::from(MEDIA_ROOT).join(slug)
+}
+
+pub fn set_auto_mount(
+    cfg: &mut Config,
+    config_path: &Path,
+    device: &str,
+    enabled: bool,
+) -> Result<Partition, ApiError> {
+    util::require_privileged()?;
+    let device = valid_dev(device)?.to_string();
+    let inv = inventory(cfg)?;
+    let (disk, part) = find_part(&inv, &device).ok_or(ApiError::NotFound)?;
+    refuse_disk(disk)?;
+    refuse_system(part)?;
+    if part.uuid.is_empty() {
+        return Err(ApiError::BadRequest(
+            "device has no UUID; cannot persist a mount".into(),
+        ));
+    }
+    let existing = cfg
+        .storage_mounts
+        .iter()
+        .find(|m| m.uuid == part.uuid)
+        .cloned();
+    if !enabled && existing.is_none() {
+        let mut out = part.clone();
+        out.auto_mount = false;
+        return Ok(out);
+    }
+    let dest = persist_dest(part, existing.as_ref());
+    if enabled {
+        std::fs::create_dir_all(&dest)
+            .map_err(|e| ApiError::BadRequest(format!("could not create mount point: {e}")))?;
+    }
+    upsert_storage_mount(
+        cfg,
+        StorageMount {
+            uuid: part.uuid.clone(),
+            mountpoint: dest,
+            device: part.path.clone(),
+            label: part.label.clone(),
+            auto_mount: enabled,
+        },
+    );
+    cfg.save(config_path)
+        .map_err(|e| ApiError::BadRequest(format!("could not persist mount: {e}")))?;
+    let inv = inventory(cfg)?;
+    find_part(&inv, &device)
+        .map(|(_, p)| p.clone())
+        .ok_or(ApiError::NotFound)
+}
+
 pub fn remount_persisted(cfg: &Config) {
     if !privileged() {
         return;
     }
     std::fs::create_dir_all(MEDIA_ROOT).ok();
     for m in &cfg.storage_mounts {
+        if !m.auto_mount {
+            continue;
+        }
         if m.mountpoint.exists() {
             let mounted = std::fs::read_to_string("/proc/mounts")
                 .unwrap_or_default()
@@ -752,5 +861,49 @@ mod tests {
         assert!(is_system_mount("/home", data));
         assert!(!is_system_mount("/media/coduos/data", data));
         assert!(!is_system_mount("/mnt/disk", data));
+    }
+
+    #[test]
+    fn persist_dest_prefers_live_mount() {
+        let part = Partition {
+            name: "sdb1".into(),
+            path: "/dev/sdb1".into(),
+            size: 1,
+            fstype: "ext4".into(),
+            label: "backup".into(),
+            uuid: "abc".into(),
+            mountpoint: "/mnt/backup".into(),
+            removable: false,
+            system: false,
+            ro: false,
+            used: None,
+            total: None,
+            health: None,
+            in_files: false,
+            auto_mount: false,
+        };
+        assert_eq!(persist_dest(&part, None), PathBuf::from("/mnt/backup"));
+        let unmounted = Partition {
+            mountpoint: String::new(),
+            ..part
+        };
+        assert_eq!(
+            persist_dest(&unmounted, None),
+            PathBuf::from("/media/coduos/backup")
+        );
+    }
+
+    #[test]
+    fn storage_mount_auto_defaults_on() {
+        let m: StorageMount = toml::from_str(
+            "uuid = \"abc\"\nmountpoint = \"/media/coduos/data\"\n",
+        )
+        .unwrap();
+        assert!(m.auto_mount);
+        let off: StorageMount = toml::from_str(
+            "uuid = \"abc\"\nmountpoint = \"/media/coduos/data\"\nauto_mount = false\n",
+        )
+        .unwrap();
+        assert!(!off.auto_mount);
     }
 }

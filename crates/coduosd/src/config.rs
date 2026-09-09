@@ -57,6 +57,14 @@ pub struct FileRoot {
     pub path: PathBuf,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageMount {
     pub uuid: String,
@@ -65,6 +73,9 @@ pub struct StorageMount {
     pub device: String,
     #[serde(default)]
     pub label: String,
+    /// Remount this volume when the daemon starts. Missing from older configs = true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub auto_mount: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

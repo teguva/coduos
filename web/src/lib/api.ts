@@ -28,6 +28,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 export function setTheme(theme: 'light' | 'dark') {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem('coduos-theme', theme);
+  syncFavicon();
   window.dispatchEvent(new Event('coduos-theme'));
 }
 
@@ -37,4 +38,16 @@ export function toggleTheme() {
 
 export function isLight() {
   return document.documentElement.dataset.theme === 'light';
+}
+
+export function syncFavicon() {
+  const href = isLight() ? '/logos/square-light.svg' : '/logos/square-dark.svg';
+  let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+  if (!link) {
+    link = document.createElement('link');
+    link.rel = 'icon';
+    document.head.appendChild(link);
+  }
+  link.type = 'image/svg+xml';
+  link.href = href;
 }

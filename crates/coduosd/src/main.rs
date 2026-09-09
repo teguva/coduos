@@ -16,6 +16,7 @@ mod systemd;
 mod util;
 mod vpn;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use clap::Parser;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -70,6 +71,7 @@ async fn main() -> Result<()> {
     let db = Arc::new(db::Db::open(&cfg.db_path())?);
     let (summary_tx, summary_rx) = stats::channel();
     stats::spawn_collector(summary_tx.clone());
+    let (jobs_tx, _) = watch::channel(HashMap::new());
 
     let http = reqwest::Client::builder()
         .user_agent(format!("CoduOS/{}", env!("CARGO_PKG_VERSION")))
@@ -83,6 +85,7 @@ async fn main() -> Result<()> {
         db,
         summary_tx,
         summary_rx,
+        jobs_tx,
         http,
     };
     ddns::spawn_updater(state.clone());

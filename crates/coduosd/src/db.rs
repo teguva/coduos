@@ -33,7 +33,8 @@ impl Db {
                 compose_yaml TEXT NOT NULL,
                 icon_url TEXT,
                 web_port INTEGER,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                last_error TEXT
             );
             CREATE TABLE IF NOT EXISTS kv (
                 key TEXT PRIMARY KEY,
@@ -41,6 +42,7 @@ impl Db {
             );
             ",
         )?;
+        let _ = conn.execute("ALTER TABLE apps ADD COLUMN last_error TEXT", []);
         Ok(Self(Mutex::new(conn)))
     }
 
@@ -126,18 +128,9 @@ impl Db {
     pub fn list_apps(&self) -> Result<Vec<AppRow>> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, compose_yaml, icon_url, web_port, created_at FROM apps ORDER BY name",
+            "SELECT id, name, compose_yaml, icon_url, web_port, created_at, last_error FROM apps ORDER BY name",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(AppRow {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                compose_yaml: r.get(2)?,
-                icon_url: r.get(3)?,
-                web_port: r.get(4)?,
-                created_at: r.get(5)?,
-            })
-        })?;
+        let rows = stmt.query_map([], map_app)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -145,18 +138,9 @@ impl Db {
         let conn = self.0.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT id, name, compose_yaml, icon_url, web_port, created_at FROM apps WHERE id = ?1",
+                "SELECT id, name, compose_yaml, icon_url, web_port, created_at, last_error FROM apps WHERE id = ?1",
                 params![id],
-                |r| {
-                    Ok(AppRow {
-                        id: r.get(0)?,
-                        name: r.get(1)?,
-                        compose_yaml: r.get(2)?,
-                        icon_url: r.get(3)?,
-                        web_port: r.get(4)?,
-                        created_at: r.get(5)?,
-                    })
-                },
+                map_app,
             )
             .optional()?;
         Ok(row)
@@ -189,6 +173,15 @@ impl Db {
         conn.execute("DELETE FROM apps WHERE id = ?1", params![id])?;
         Ok(())
     }
+
+    pub fn set_last_error(&self, id: &str, err: Option<&str>) -> Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE apps SET last_error = ?1 WHERE id = ?2",
+            params![err, id],
+        )?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +199,19 @@ pub struct AppRow {
     pub icon_url: Option<String>,
     pub web_port: Option<i64>,
     pub created_at: String,
+    pub last_error: Option<String>,
+}
+
+fn map_app(r: &rusqlite::Row) -> rusqlite::Result<AppRow> {
+    Ok(AppRow {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        compose_yaml: r.get(2)?,
+        icon_url: r.get(3)?,
+        web_port: r.get(4)?,
+        created_at: r.get(5)?,
+        last_error: r.get(6)?,
+    })
 }
 
 fn now_rfc3339() -> String {

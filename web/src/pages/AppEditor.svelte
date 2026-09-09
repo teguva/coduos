@@ -2,6 +2,16 @@
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
   import {
+    errorTip,
+    isBusy,
+    isLaunchable,
+    overlayJob,
+    subscribeAppJobs,
+    type AppJob,
+    type AppRecord,
+    type AppStatus
+  } from '../lib/apps';
+  import {
     addService,
     exampleStack,
     interpolationsFromStack,
@@ -15,6 +25,9 @@
   import AppWindow from '../components/AppWindow.svelte';
   import ComposeEditor from '../components/ComposeEditor.svelte';
   import ComposeEnv from '../components/ComposeEnv.svelte';
+  import InfoTip from '../components/InfoTip.svelte';
+  import ProgressStrip from '../components/ProgressStrip.svelte';
+  import StatusPill from '../components/StatusPill.svelte';
   import UiIcon from '../components/UiIcon.svelte';
 
   let { go, id, onClose } = $props<{ go: (to: string) => void; id?: string; onClose: () => void }>();
@@ -25,15 +38,40 @@
   let pane = $state<'app' | 'services' | 'env'>('app');
   let tab = $state(0);
   let appId = $state('');
+  let idCustom = $state(false);
   let logs = $state('');
   let error = $state('');
   let busy = $state('');
-  let running = $state(false);
-  let statusError = $state('');
+  let needsUpdate = $state(false);
+  let status = $state<AppStatus>({
+    running: false,
+    installed: false,
+    phase: 'not_installed'
+  });
 
   const extras = $derived(Object.keys(stack.extraDoc).sort());
   const envTotal = $derived(stackEnvCount(stack));
   const svc = $derived(stack.services[tab]);
+  const jobBusy = $derived(isBusy(status.phase));
+  const primary = $derived.by(() => {
+    if (!id || jobBusy) return null;
+    if (needsUpdate && status.installed) return 'update' as const;
+    if (status.phase === 'not_installed') return 'install' as const;
+    if (status.phase === 'error') return status.installed ? ('start' as const) : ('install' as const);
+    if (status.phase === 'stopped') return 'start' as const;
+    return null;
+  });
+  const primaryLabel = $derived(
+    status.phase === 'error' && (primary === 'install' || primary === 'start')
+      ? 'Retry'
+      : primary === 'install'
+        ? 'Install'
+        : primary === 'start'
+          ? 'Start'
+          : primary === 'update'
+            ? 'Update'
+            : ''
+  );
 
   function svcMeta(s: StackForm['services'][number]) {
     const bits: string[] = [];
@@ -83,26 +121,65 @@
     else if (tab > i) tab -= 1;
   }
 
-  onMount(async () => {
+  function applyApp(app: AppRecord, jobs: Record<string, AppJob>) {
+    yaml = app.compose_yaml || yaml;
+    stack = yamlToStack(yaml);
+    if (!stack.title) stack.title = app.name;
+    if (app.icon_url) stack.iconUrl = app.icon_url;
+    if (app.web_port && !stack.webPort) stack.webPort = String(app.web_port);
+    appId = app.id;
+    status = overlayJob(app.status, jobs[app.id]);
+  }
+
+  async function loadApp(jobs: Record<string, AppJob>) {
+    if (!id) return;
+    const app = await api<AppRecord>('/api/apps/' + id);
+    applyApp(app, jobs);
+  }
+
+  async function refreshStatus(jobs: Record<string, AppJob>) {
+    if (!id) return;
+    const app = await api<AppRecord>('/api/apps/' + id);
+    status = overlayJob(app.status, jobs[app.id]);
+  }
+
+  function suggestedId() {
+    return slug(stack.title);
+  }
+
+  $effect(() => {
+    if (id || idCustom) return;
+    appId = suggestedId();
+  });
+
+  function onIdInput(ev: Event) {
+    const v = (ev.currentTarget as HTMLInputElement).value;
+    appId = v;
+    idCustom = v.trim() !== '' && v !== suggestedId();
+  }
+
+  onMount(() => {
+    let jobs: Record<string, AppJob> = {};
     if (!id) {
-      appId = slug(stack.title || stack.services[0]?.serviceName || 'app');
       syncYaml();
-      return;
+    } else {
+      loadApp(jobs)
+        .then(() => {
+          pane = stack.services.length > 1 ? 'services' : 'app';
+        })
+        .catch((e: Error) => (error = e.message));
     }
-    try {
-      const app = await api<any>('/api/apps/' + id);
-      yaml = app.compose_yaml;
-      stack = yamlToStack(yaml);
-      if (!stack.title) stack.title = app.name;
-      if (app.icon_url) stack.iconUrl = app.icon_url;
-      if (app.web_port && !stack.webPort) stack.webPort = String(app.web_port);
-      appId = app.id;
-      running = app.status?.running;
-      statusError = app.status?.error || '';
-      pane = stack.services.length > 1 ? 'services' : 'app';
-    } catch (e: any) {
-      error = e.message;
-    }
+    const stop = subscribeAppJobs((next) => {
+      const prev = id ? jobs[id] : undefined;
+      jobs = next;
+      if (!id) return;
+      if (prev && !next[id]) {
+        refreshStatus(jobs).catch(() => {});
+        return;
+      }
+      if (next[id]) status = overlayJob(status, next[id]);
+    });
+    return stop;
   });
 
   async function save(e: Event) {
@@ -128,16 +205,25 @@
       else syncForm();
       const body = {
         name: stack.title || stack.services[0]?.serviceName || 'app',
-        id: appId || undefined,
+        id: (appId.trim() || suggestedId()) || undefined,
         compose_yaml: yaml,
         icon_url: stack.iconUrl || null,
         web_port: stack.webPort ? Number(stack.webPort) : null
       };
-      const app = id
-        ? await api<any>('/api/apps/' + id, { method: 'PUT', body: JSON.stringify(body) })
-        : await api<any>('/api/apps', { method: 'POST', body: JSON.stringify(body) });
-      go('/apps/' + app.id);
-      running = app.status?.running;
+      if (id) {
+        const app = await api<AppRecord>('/api/apps/' + id, { method: 'PUT', body: JSON.stringify(body) });
+        status = app.status;
+        if (app.status.installed) needsUpdate = true;
+      } else {
+        const app = await api<AppRecord>('/api/apps', { method: 'POST', body: JSON.stringify(body) });
+        try {
+          await api<AppRecord>('/api/apps/' + app.id + '/install', { method: 'POST' });
+        } catch (err: any) {
+          error = err.message;
+        }
+        go('/apps/' + app.id);
+        return;
+      }
     } catch (err: any) {
       error = err.message;
     } finally {
@@ -145,14 +231,14 @@
     }
   }
 
-  async function act(kind: 'start' | 'stop' | 'restart') {
+  async function act(kind: 'install' | 'start' | 'stop' | 'restart' | 'update') {
     if (!id) return;
     busy = kind;
     error = '';
     try {
-      const app = await api<any>(`/api/apps/${id}/${kind}`, { method: 'POST' });
-      running = app.status?.running;
-      statusError = app.status?.error || '';
+      const app = await api<AppRecord>(`/api/apps/${id}/${kind}`, { method: 'POST' });
+      status = app.status;
+      if (kind === 'update' || kind === 'install' || kind === 'start') needsUpdate = false;
     } catch (err: any) {
       error = err.message;
     } finally {
@@ -169,7 +255,7 @@
   async function remove() {
     if (!id || !confirm('Remove this app and stop its containers?')) return;
     await api('/api/apps/' + id, { method: 'DELETE' });
-    go('/apps');
+    go('/');
   }
 </script>
 
@@ -180,19 +266,34 @@
       <button type="button" class="os-tab" class:active={mode === 'yaml'} role="tab" aria-selected={mode === 'yaml'} onclick={() => setMode('yaml')}>YAML</button>
     </div>
     {#if id}
-      {#if !running}
-        <button class="btn compact" disabled={!!busy} onclick={() => act('start')}>Start</button>
-      {:else}
-        <button class="btn secondary compact" disabled={!!busy} onclick={() => act('stop')}>Stop</button>
+      <StatusPill {status} />
+      {#if status.phase === 'error'}
+        <InfoTip label="Why this failed" text={errorTip(status)} />
       {/if}
-      <button class="btn secondary compact" disabled={!!busy} onclick={() => act('restart')}>Restart</button>
-      {#if stack.webPort}
+      {#if primary}
+        <button class="btn compact" disabled={!!busy || jobBusy} onclick={() => act(primary)}>{primaryLabel}</button>
+        {#if primary === 'install'}
+          <InfoTip label="What Install does" text="Downloads the images, then starts the app. Large apps can take several minutes." />
+        {:else if primary === 'update'}
+          <InfoTip label="What Update does" text="Downloads newer images and restarts this app." />
+        {/if}
+      {/if}
+      {#if status.running}
+        <button class="btn secondary compact" disabled={!!busy || jobBusy} onclick={() => act('stop')}>Stop</button>
+      {/if}
+      <button class="btn secondary compact" disabled={!!busy || jobBusy || !status.installed} onclick={() => act('restart')}>Restart</button>
+      {#if stack.webPort && isLaunchable(status)}
         <a class="btn secondary compact" href="{stack.scheme}://{stack.webHost || location.hostname}:{stack.webPort}{stack.webPath || '/'}" target="_blank" rel="noreferrer">Open</a>
       {/if}
     {/if}
   {/snippet}
 
-{#if statusError}<div class="err">{statusError}</div>{/if}
+{#if id && jobBusy}
+  <ProgressStrip percent={status.percent ?? null} pulse={status.percent == null} />
+  {#if status.message}
+    <p class="hint">{status.message}</p>
+  {/if}
+{/if}
 {#if error}<div class="err">{error}</div>{/if}
 
 <form onsubmit={save}>
@@ -212,9 +313,19 @@
         <div class="app-grid">
           <label class="field"><span>Title</span><input bind:value={stack.title} placeholder="Immich" required /></label>
           {#if !id}
-            <label class="field"><span>Id (optional)</span><input bind:value={appId} placeholder="immich" /></label>
+            <label class="field">
+              <span class="field-head">Id
+                <InfoTip label="About the app id" text="Filled from the title: lowercase, spaces become dashes. You can change it; after that it stays put. This is the folder and Docker name and cannot change later." />
+              </span>
+              <input value={appId} placeholder="jellyfin" oninput={onIdInput} />
+            </label>
           {:else}
-            <label class="field"><span>Id</span><input value={appId} disabled /></label>
+            <label class="field">
+              <span class="field-head">Id
+                <InfoTip label="About the app id" text="Folder and Docker name. The title can change later; this cannot." />
+              </span>
+              <input value={appId} disabled />
+            </label>
           {/if}
           <label class="field span-2"><span>Icon URL</span>
             <div class="icon-row">
@@ -250,7 +361,7 @@
         {#if extras.length}
           <p class="hint">Kept from YAML: {extras.join(', ')}</p>
         {/if}
-        <p class="hint">{id ? (running ? 'Running' : 'Stopped') : 'Name the app, then set services and environment.'}</p>
+        <p class="hint">{id ? (status.message || '') : 'Name the app, then set services and environment.'}</p>
       </section>
     {:else if pane === 'services'}
       <div class="compose-split">
@@ -287,12 +398,15 @@
     <label class="field"><span>compose.yml</span><textarea class="yaml-editor" bind:value={yaml} required></textarea></label>
   {/if}
   <div class="row">
-    <button class="btn" disabled={!!busy}>{id ? 'Save' : 'Create'}</button>
+    <button class="btn" disabled={!!busy || jobBusy}>{id ? 'Save' : 'Install'}</button>
+    {#if !id}
+      <InfoTip label="What Install does" text="Downloads the images, then starts the app. Large apps can take several minutes." />
+    {/if}
     {#if id}
       {#if stack.webPort}
         <button type="button" class="btn secondary" onclick={() => go(`/proxy?app=${encodeURIComponent(id)}&port=${stack.webPort}`)}>Add to Proxy</button>
       {/if}
-      <button type="button" class="btn danger" onclick={remove}>Delete</button>
+      <button type="button" class="btn danger" disabled={jobBusy} onclick={remove}>Delete</button>
     {/if}
   </div>
 </form>

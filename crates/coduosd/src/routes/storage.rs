@@ -17,6 +17,7 @@ pub fn router() -> Router<AppState> {
         .route("/storage/unmount", post(unmount))
         .route("/storage/files", post(add_files))
         .route("/storage/format", post(format_dev))
+        .route("/storage/auto-mount", post(auto_mount))
 }
 
 async fn list(
@@ -107,5 +108,26 @@ async fn format_dev(
         &body.device,
         body.fstype.as_deref().unwrap_or("ext4"),
         body.label.as_deref().unwrap_or(""),
+    )?))
+}
+
+#[derive(Deserialize)]
+struct AutoMountIn {
+    device: String,
+    enabled: bool,
+}
+
+async fn auto_mount(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<AutoMountIn>,
+) -> Result<Json<Partition>, ApiError> {
+    current_user(&state, &jar).await?;
+    let mut cfg = state.config.write().await;
+    Ok(Json(storage::set_auto_mount(
+        &mut cfg,
+        &state.config_path,
+        &body.device,
+        body.enabled,
     )?))
 }

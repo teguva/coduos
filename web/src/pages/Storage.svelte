@@ -21,6 +21,7 @@
     total?: number | null;
     health?: string | null;
     in_files: boolean;
+    auto_mount: boolean;
   };
   type Disk = {
     name: string;
@@ -110,10 +111,32 @@
     return !d.system;
   }
 
+  function canAutoMount(p: Partition, d: Disk) {
+    if (!canManage(d) || !p.uuid) return false;
+    const kind = role(p, d);
+    return kind !== 'swap' && kind !== 'efi' && kind !== 'boot' && kind !== 'system';
+  }
+
   function displayMount(p: Partition, d: Disk) {
     const kind = role(p, d);
     if (kind === 'swap') return 'Swap';
     return p.mountpoint;
+  }
+
+  async function setAuto(device: string, enabled: boolean) {
+    error = '';
+    busy = device;
+    try {
+      await api('/api/storage/auto-mount', {
+        method: 'POST',
+        body: JSON.stringify({ device, enabled })
+      });
+      await load();
+    } catch (e: any) {
+      error = e.message;
+    } finally {
+      busy = '';
+    }
   }
 
   async function mount(device: string) {
@@ -203,7 +226,8 @@
       mountpoint: '',
       removable: true,
       system: false,
-      in_files: false
+      in_files: false,
+      auto_mount: false
     };
   }
 </script>
@@ -252,6 +276,17 @@
             <div class="meta">{displayMount(p, d)} · {bytes(used)} / {bytes(total)}</div>
           {:else if p.mountpoint}
             <div class="meta">{displayMount(p, d)}</div>
+          {/if}
+          {#if canAutoMount(p, d)}
+            <label class="toggle-row storage-auto">
+              <span>Mount at startup</span>
+              <input
+                type="checkbox"
+                checked={p.auto_mount}
+                disabled={!inv?.privileged || busy === p.path}
+                onchange={(e) => setAuto(p.path, e.currentTarget.checked)}
+              />
+            </label>
           {/if}
         </div>
         {#if canManage(d)}
@@ -318,6 +353,17 @@
           {#if showUsage(p, d)}
             <div class="bar"><i style="width:{pct(used, total)}%"></i></div>
             <div class="meta">{displayMount(p, d)} · {bytes(used)} / {bytes(total)}</div>
+          {/if}
+          {#if canAutoMount(p, d)}
+            <label class="toggle-row storage-auto">
+              <span>Mount at startup</span>
+              <input
+                type="checkbox"
+                checked={p.auto_mount}
+                disabled={!inv?.privileged || busy === p.path}
+                onchange={(e) => setAuto(p.path, e.currentTarget.checked)}
+              />
+            </label>
           {/if}
         </div>
         <div class="part-actions">

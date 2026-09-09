@@ -7,7 +7,6 @@
   import PowerOverlay from './components/PowerOverlay.svelte';
   import Setup from './pages/Setup.svelte';
   import Login from './pages/Login.svelte';
-  import Apps from './pages/Apps.svelte';
   import AppEditor from './pages/AppEditor.svelte';
   import Files from './pages/Files.svelte';
   import Settings from './pages/Settings.svelte';
@@ -20,18 +19,23 @@
   let setupNeeded = $state(false);
   let bootError = $state('');
 
-  function go(to: string) {
-    history.pushState({}, '', to);
+  function syncPath() {
+    if (location.pathname === '/apps') {
+      history.replaceState({}, '', '/' + location.search);
+    }
     path = location.pathname;
     search = location.search;
   }
 
+  function go(to: string) {
+    history.pushState({}, '', to);
+    syncPath();
+  }
+
   onMount(() => {
-    const onPop = () => {
-      path = location.pathname;
-      search = location.search;
-    };
+    const onPop = () => syncPath();
     window.addEventListener('popstate', onPop);
+    syncPath();
     ensureIconIndex();
     refresh();
     resumeWait();
@@ -76,7 +80,6 @@
       return { name: 'app', id: decodeURIComponent(path.slice('/apps/'.length)) };
     }
     if (path === '/apps/new') return { name: 'new' };
-    if (path === '/apps') return { name: 'apps' };
     if (path === '/files') return { name: 'files' };
     if (path === '/services' || path === '/tasks') return { name: 'services' };
     if (path === '/storage' || path === '/settings/storage') return { name: 'settings', pane: 'storage' };
@@ -122,8 +125,6 @@
   <Desktop {username} {go} {path} onLogout={async () => { await api('/api/logout', { method: 'POST' }); username = ''; }} />
   {#if page.name === 'files'}
     <Files onClose={() => go('/')} />
-  {:else if page.name === 'apps'}
-    <Apps {go} onClose={() => go('/')} />
   {:else if page.name === 'new'}
     <AppEditor {go} onClose={() => go('/')} />
   {:else if page.name === 'app'}

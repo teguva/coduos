@@ -1,11 +1,22 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, toggleTheme, isLight } from '../lib/api';
+  import {
+    isBusy,
+    isLaunchable,
+    overlayJob,
+    subscribeAppJobs,
+    type AppJob,
+    type AppRecord
+  } from '../lib/apps';
   import { applyPower as sendPower } from '../lib/power';
   import { bytes, bps, pct, uptime, shortOs, prettyGpu, watts, joinMeta, batteryLabel } from '../lib/format';
   import { appIcons, appIcon, iconRev } from '../lib/icons';
+  import BrandLogo from './BrandLogo.svelte';
   import Icon from './Icon.svelte';
   import UiIcon from './UiIcon.svelte';
+  import ProgressStrip from './ProgressStrip.svelte';
+  import StatusPill from './StatusPill.svelte';
   import Sparkline from './Sparkline.svelte';
   import Confirm from './Confirm.svelte';
 
@@ -64,13 +75,7 @@
     version: string;
     privileged?: boolean;
   };
-  type App = {
-    id: string;
-    name: string;
-    icon_url?: string | null;
-    web_port?: number | null;
-    status: { running: boolean };
-  };
+  type App = AppRecord;
 
   let summary = $state<Summary | null>(null);
   let apps = $state<App[]>([]);
@@ -87,9 +92,9 @@
 
   const systemTiles = [
     { id: 'files', name: 'Files', icon: appIcons.files, to: '/files' },
-    { id: 'apps', name: 'Apps', icon: appIcons.apps, to: '/apps' },
     { id: 'settings', name: 'Settings', icon: appIcons.settings, to: '/settings' },
-    { id: 'services', name: 'Services', icon: appIcons.services, to: '/services' }
+    { id: 'services', name: 'Services', icon: appIcons.services, to: '/services' },
+    { id: 'install', name: 'Install', icon: appIcons.install, to: '/apps/new' }
   ];
 
   let q = $derived(query.trim().toLowerCase());
@@ -100,11 +105,7 @@
     (summary?.networks ?? []).find((n) => !n.virtual_iface && n.operstate === 'up') ||
       (summary?.networks ?? []).find((n) => !n.virtual_iface)
   );
-  let worstDisk = $derived.by(() => {
-    const disks = summary?.disks ?? [];
-    if (!disks.length) return null;
-    return disks.slice().sort((a, b) => pct(b.used, b.total) - pct(a.used, a.total))[0];
-  });
+  let disks = $derived(summary?.disks ?? []);
   let topProc = $derived(
     (summary?.processes ?? []).find(
       (p) =>
@@ -127,6 +128,12 @@
     return '';
   }
 
+  function diskLabel(mount: string) {
+    if (mount === '/') return 'System';
+    const segs = mount.split('/').filter(Boolean);
+    return segs[segs.length - 1] || mount;
+  }
+
   function recordHist(s: Summary) {
     cpuHist = [...cpuHist, s.cpu_percent].slice(-90);
     memHist = [...memHist, pct(s.mem_used, s.mem_total)].slice(-90);
@@ -140,10 +147,7 @@
   }
 
   function appActive(to: string) {
-    if (to === '/apps') {
-      return path === '/apps' || (path.startsWith('/apps/') && path !== '/apps/new');
-    }
-    return path === to || path.startsWith(to + '/');
+    return path === to || (to !== '/' && path.startsWith(to + '/'));
   }
 
   onMount(() => {
@@ -162,9 +166,24 @@
         recordHist(s);
       })
       .catch(() => {});
+    let jobs: Record<string, AppJob> = {};
     api<App[]>('/api/apps')
-      .then((a) => (apps = a))
+      .then((a) => (apps = a.map((app) => ({ ...app, status: overlayJob(app.status, jobs[app.id]) }))))
       .catch(() => {});
+    const unsubJobs = subscribeAppJobs((next) => {
+      const ended = Object.keys(jobs).filter((id) => !next[id]);
+      jobs = next;
+      apps = apps.map((app) =>
+        next[app.id] ? { ...app, status: overlayJob(app.status, next[app.id]) } : app
+      );
+      if (ended.length) {
+        api<App[]>('/api/apps')
+          .then((a) => {
+            apps = a.map((app) => ({ ...app, status: overlayJob(app.status, jobs[app.id]) }));
+          })
+          .catch(() => {});
+      }
+    });
     const c = setInterval(() => (now = new Date()), 30000);
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key !== '/' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
@@ -178,6 +197,7 @@
     window.addEventListener('coduos-theme', onTheme);
     return () => {
       es.close();
+      unsubJobs();
       clearInterval(c);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('coduos-theme', onTheme);
@@ -185,7 +205,7 @@
   });
 
   function openApp(app: App) {
-    if (app.web_port) {
+    if (isLaunchable(app.status) && app.web_port) {
       window.open(`${location.protocol}//${location.hostname}:${app.web_port}`, '_blank');
     } else {
       go('/apps/' + app.id);
@@ -210,10 +230,13 @@
 
 <div class="desktop" class:has-bottom={true}>
   <header class="topbar">
-    <div>
-      <div class="host">{summary?.hostname ?? 'CoduOS'}</div>
-      <div class="clock">
-        {#if summary}{shortOs(summary.os)} · up {uptime(summary.uptime_secs)} · {/if}{now.toLocaleString()}
+    <div class="topbar-brand">
+      <BrandLogo kind="square" class="topbar-mark" />
+      <div>
+        <div class="host">{summary?.hostname ?? 'CoduOS'}</div>
+        <div class="clock">
+          {#if summary}{shortOs(summary.os)} · up {uptime(summary.uptime_secs)} · {/if}{now.toLocaleString()}
+        </div>
       </div>
     </div>
     <div class="topbar-actions">
@@ -349,21 +372,38 @@
             <Sparkline rx={netHist.map((s) => s.rx)} tx={netHist.map((s) => s.tx)} showScale />
           </button>
         {/if}
-        {#if worstDisk}
-          <button class="widget hit" onclick={() => tap('/settings/storage')}>
-            <div class="gauge {loadTone(pct(worstDisk.used, worstDisk.total))}" style="--p:{pct(worstDisk.used, worstDisk.total)}">
-              <span>{pct(worstDisk.used, worstDisk.total)}%</span>
-            </div>
+        {#if disks.length}
+          <button class="widget widget-storage hit" class:widget-storage-many={disks.length > 1} onclick={() => tap('/settings/storage')}>
+            {#if disks.length === 1}
+              <div class="gauge {loadTone(pct(disks[0].used, disks[0].total))}" style="--p:{pct(disks[0].used, disks[0].total)}">
+                <span>{pct(disks[0].used, disks[0].total)}%</span>
+              </div>
+            {/if}
             <div>
               <h3><UiIcon name="storage" size={14} /> Storage</h3>
-              <div class="headline">{bytes(worstDisk.total - worstDisk.used)} free</div>
-              <div class="meta clip">
-                {joinMeta([
-                  worstDisk.mount === '/' ? 'System disk' : worstDisk.mount,
-                  `${bytes(worstDisk.used)} / ${bytes(worstDisk.total)}`,
-                  (summary.disks?.length ?? 0) > 1 ? `${summary.disks.length} disks` : null
-                ])}
-              </div>
+              {#if disks.length === 1}
+                <div class="headline">{bytes(disks[0].total - disks[0].used)} free</div>
+                <div class="meta clip">
+                  {joinMeta([
+                    disks[0].mount === '/' ? 'System disk' : disks[0].mount,
+                    `${bytes(disks[0].used)} / ${bytes(disks[0].total)}`
+                  ])}
+                </div>
+              {:else}
+                <div class="disk-list">
+                  {#each disks as d}
+                    {@const p = pct(d.used, d.total)}
+                    <div class="disk-row">
+                      <div class="disk-row-head">
+                        <span class="clip">{diskLabel(d.mount)}</span>
+                        <span>{p}%</span>
+                      </div>
+                      <div class="bar {loadTone(p)}"><i style="width:{p}%"></i></div>
+                      <div class="meta clip">{bytes(d.total - d.used)} free</div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             </div>
           </button>
         {/if}
@@ -399,15 +439,32 @@
           </button>
         {/each}
         {#each shownApps as app}
-          <button class="desk-app hit" class:active={appActive('/apps/' + app.id)} onclick={() => openApp(app)}>
-            <Icon name={appIcon(app)} size={64} class="tile-img" alt="" />
-            <div class="label">{app.name}</div>
-          </button>
+          <div class="desk-app" class:active={appActive('/apps/' + app.id)}>
+            <button type="button" class="desk-app-main hit" onclick={() => openApp(app)}>
+              <div class="icon-wrap">
+                <Icon name={appIcon(app)} size={64} class="tile-img" alt="" />
+                {#if isBusy(app.status.phase)}
+                  <ProgressStrip percent={app.status.percent ?? null} pulse={app.status.percent == null} />
+                {/if}
+              </div>
+              <div class="label">{app.name}</div>
+            </button>
+            <button
+              type="button"
+              class="desk-app-status"
+              onclick={() => go('/apps/' + app.id)}
+              aria-label="{app.name} settings"
+            >
+              <StatusPill status={app.status} />
+            </button>
+          </div>
         {/each}
         {#if !q && shownSystem.length + shownApps.length === 0}
           <p class="hint">Nothing matches.</p>
         {:else if q && shownSystem.length + shownApps.length === 0}
           <p class="hint">No apps named “{query}”.</p>
+        {:else if !q && shownApps.length === 0}
+          <p class="hint desk-apps-empty">No apps yet. Open Install to add one from Compose.</p>
         {/if}
       </div>
       {/key}
@@ -421,8 +478,8 @@
     <button class="hit" class:active={path.startsWith('/files')} onclick={() => go('/files')}>
       <UiIcon name="folder" size={22} /> Files
     </button>
-    <button class="hit" class:active={path.startsWith('/apps')} onclick={() => go('/apps')}>
-      <UiIcon name="apps" size={22} /> Apps
+    <button class="hit" class:active={path.startsWith('/services') || path === '/tasks'} onclick={() => go('/services')}>
+      <UiIcon name="services" size={22} /> Services
     </button>
     <button class="hit" class:active={path.startsWith('/settings')} onclick={() => go('/settings')}>
       <UiIcon name="settings" size={22} /> Settings

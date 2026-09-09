@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
-  import UiIcon from '../components/UiIcon.svelte';
+  import BrandLogo from '../components/BrandLogo.svelte';
 
   let { onDone, onNeedSetup } = $props<{ onDone: () => void; onNeedSetup: () => void }>();
   let username = $state('');
@@ -39,8 +39,10 @@
 
 <div class="auth-wrap">
   <form class="auth-card" onsubmit={submit}>
-    <div class="auth-logo"><UiIcon name="computer" size={48} /></div>
-    <h1>CoduOS</h1>
+    <div class="auth-logo">
+      <BrandLogo kind="text" />
+    </div>
+    <h1 class="sr-only">CoduOS</h1>
     <p>Sign in with the admin account created on first start.</p>
     <label class="field"><span>Username</span><input bind:value={username} autocomplete="username" required /></label>
     <label class="field"><span>Password</span><input type="password" bind:value={password} autocomplete="current-password" required /></label>

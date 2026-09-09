@@ -130,6 +130,10 @@ struct Collector {
     prev_at: Instant,
     prev_rapl_uj: Option<u64>,
     prev_rapl_at: Option<Instant>,
+    prev_gpu_engine: HashMap<String, u64>,
+    prev_gpu_engine_at: Option<Instant>,
+    prev_gpu_rapl_uj: Option<u64>,
+    prev_gpu_rapl_at: Option<Instant>,
 }
 
 pub fn spawn_collector(tx: tokio::sync::watch::Sender<SystemSummary>) {
@@ -141,6 +145,10 @@ pub fn spawn_collector(tx: tokio::sync::watch::Sender<SystemSummary>) {
             prev_at: Instant::now(),
             prev_rapl_uj: None,
             prev_rapl_at: None,
+            prev_gpu_engine: HashMap::new(),
+            prev_gpu_engine_at: None,
+            prev_gpu_rapl_uj: None,
+            prev_gpu_rapl_at: None,
         };
         loop {
             let summary = col.collect();
@@ -211,21 +219,7 @@ impl Collector {
         }
         self.prev_at = now;
 
-        let disk_infos = disks
-            .iter()
-            .filter(|d| interesting_mount(d.mount_point()))
-            .map(|d| {
-                let total = d.total_space();
-                let avail = d.available_space();
-                DiskInfo {
-                    name: d.name().to_string_lossy().into_owned(),
-                    mount: d.mount_point().display().to_string(),
-                    fs: d.file_system().to_string_lossy().into_owned(),
-                    total,
-                    used: total.saturating_sub(avail),
-                }
-            })
-            .collect();
+        let disk_infos = collect_disk_infos(&disks);
 
         let mut components = Components::new_with_refreshed_list();
         components.refresh(true);
@@ -242,7 +236,7 @@ impl Collector {
         }
         let cpu_temp_c = pick_cpu_temp(&sensors);
         let cpu_power_w = self.cpu_power_w();
-        let gpus = collect_gpus(&sensors);
+        let gpus = self.collect_gpus(&sensors);
 
         let mut processes: Vec<ProcInfo> = self
             .sys
@@ -317,6 +311,104 @@ impl Collector {
         self.prev_rapl_uj = Some(energy);
         self.prev_rapl_at = Some(now);
         watts.filter(|w| w.is_finite() && *w >= 0.0 && *w < 2000.0)
+    }
+
+    fn gpu_rapl_power_w(&mut self) -> Option<f32> {
+        let now = Instant::now();
+        let energy = rapl_energy_uj(&["pp1", "uncore", "gpu", "gt"])?;
+        let watts = if let (Some(prev), Some(at)) = (self.prev_gpu_rapl_uj, self.prev_gpu_rapl_at) {
+            let dt = now.duration_since(at).as_secs_f64();
+            if dt >= 0.4 {
+                let duj = energy.saturating_sub(prev) as f64;
+                Some((duj / dt / 1_000_000.0) as f32)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.prev_gpu_rapl_uj = Some(energy);
+        self.prev_gpu_rapl_at = Some(now);
+        watts.filter(|w| w.is_finite() && *w >= 0.0 && *w < 200.0)
+    }
+
+    fn collect_gpus(&mut self, sensors: &[SensorInfo]) -> Vec<GpuInfo> {
+        let mut gpus = nvidia_gpus();
+        gpus.extend(self.sysfs_gpus(sensors));
+        gpus
+    }
+
+    fn sysfs_gpus(&mut self, sensors: &[SensorInfo]) -> Vec<GpuInfo> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+            return out;
+        };
+        let now = Instant::now();
+        let dt = self.prev_gpu_engine_at.map(|at| now.duration_since(at));
+        let mut next_engines = HashMap::new();
+        let gpu_rapl = self.gpu_rapl_power_w();
+        for ent in entries.flatten() {
+            let name = ent.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("card") || name.contains('-') {
+                continue;
+            }
+            let card = ent.path();
+            let dev = card.join("device");
+            let vendor_id = sysfs_trim(&dev.join("vendor").display().to_string()).to_ascii_lowercase();
+            let vendor = match vendor_id.as_str() {
+                "0x1002" => "amd",
+                "0x8086" => "intel",
+                "0x10de" => continue,
+                _ => continue,
+            };
+            let hwmon = first_hwmon(&dev);
+            let mut temp = hwmon.as_ref().and_then(hwmon_temp_c);
+            if temp.is_none() {
+                let keys = match vendor {
+                    "amd" => ["amdgpu", "edge", "junction"],
+                    "intel" => ["i915", "xe", "igpu"],
+                    _ => ["gpu", "drm", "igpu"],
+                };
+                temp = sensors.iter().find_map(|s| {
+                    let l = s.label.to_ascii_lowercase();
+                    keys.iter().find(|k| l.contains(*k)).map(|_| s.temp_c)
+                });
+            }
+            let mut power_w = hwmon.as_ref().and_then(hwmon_power_w);
+            if power_w.is_none() && vendor == "intel" {
+                power_w = gpu_rapl;
+            }
+            let engines = intel_engine_busy_ns(&card, &dev);
+            for (eng, ns) in &engines {
+                next_engines.insert(format!("{name}/{eng}"), *ns);
+            }
+            let mut util = gpu_busy(&dev, &card);
+            if util.is_none() {
+                if let Some(elapsed) = dt {
+                    util = intel_util_percent(&name, &engines, &self.prev_gpu_engine, elapsed);
+                }
+            }
+            let mem_used = sysfs_u64(&dev.join("mem_info_vram_used"));
+            let mem_total = sysfs_u64(&dev.join("mem_info_vram_total")).filter(|n| *n > 0);
+            let pretty = match vendor {
+                "amd" => "AMD graphics".into(),
+                "intel" => "Intel graphics".into(),
+                _ => format!("{vendor} GPU"),
+            };
+            out.push(GpuInfo {
+                name: pretty,
+                vendor: vendor.into(),
+                util_percent: util,
+                mem_used,
+                mem_total,
+                temp_c: temp,
+                power_w,
+            });
+        }
+        self.prev_gpu_engine = next_engines;
+        self.prev_gpu_engine_at = Some(now);
+        out
     }
 }
 
@@ -454,12 +546,118 @@ fn parse_pct(s: &str) -> f32 {
     s.trim().trim_end_matches('%').parse().unwrap_or(0.0)
 }
 
-fn interesting_mount(mount: &Path) -> bool {
-    mount == PathBuf::from("/")
-        || mount.starts_with("/DATA")
-        || mount.starts_with("/mnt")
-        || mount.starts_with("/media")
-        || mount.starts_with("/home")
+fn collect_disk_infos(disks: &Disks) -> Vec<DiskInfo> {
+    let mut by_dev: HashMap<String, DiskInfo> = HashMap::new();
+    for d in disks.iter() {
+        let mount = d.mount_point();
+        let fs = d.file_system().to_string_lossy();
+        if !interesting_fs(fs.as_ref(), mount) || noise_mount(mount) {
+            continue;
+        }
+        let total = d.total_space();
+        if total == 0 {
+            continue;
+        }
+        let name = d.name().to_string_lossy().into_owned();
+        if name.is_empty() {
+            continue;
+        }
+        let key = disk_key(&name);
+        let info = DiskInfo {
+            name: name.clone(),
+            mount: mount.display().to_string(),
+            fs: fs.into_owned(),
+            total,
+            used: total.saturating_sub(d.available_space()),
+        };
+        match by_dev.get(&key) {
+            None => {
+                by_dev.insert(key, info);
+            }
+            Some(old) if better_mount(&info.mount, &old.mount) => {
+                by_dev.insert(key, info);
+            }
+            _ => {}
+        }
+    }
+    let mut v: Vec<_> = by_dev.into_values().collect();
+    v.sort_by(|a, b| {
+        (a.mount != "/")
+            .cmp(&(b.mount != "/"))
+            .then_with(|| a.mount.cmp(&b.mount))
+    });
+    v
+}
+
+fn interesting_fs(fs: &str, mount: &Path) -> bool {
+    let fs = fs.trim().to_ascii_lowercase();
+    if fs == "overlay" || fs == "overlayfs" {
+        return mount == Path::new("/");
+    }
+    !matches!(
+        fs.as_str(),
+        "tmpfs"
+            | "devtmpfs"
+            | "devfs"
+            | "ramfs"
+            | "squashfs"
+            | "proc"
+            | "sysfs"
+            | "cgroup"
+            | "cgroup2"
+            | "devpts"
+            | "securityfs"
+            | "pstore"
+            | "bpf"
+            | "tracefs"
+            | "debugfs"
+            | "fusectl"
+            | "mqueue"
+            | "hugetlbfs"
+            | "nsfs"
+            | "autofs"
+            | "efivarfs"
+            | "binfmt_misc"
+            | "configfs"
+            | "rpc_pipefs"
+            | "fuse.gvfsd-fuse"
+            | "iso9660"
+            | "udf"
+    )
+}
+
+fn noise_mount(mount: &Path) -> bool {
+    let s = mount.to_string_lossy();
+    s == "/tmp"
+        || s.starts_with("/tmp/")
+        || s.starts_with("/boot")
+        || s == "/run"
+        || (s.starts_with("/run/") && !s.starts_with("/run/media"))
+        || s.starts_with("/snap")
+        || s.starts_with("/dev")
+        || s.starts_with("/sys")
+        || s.starts_with("/proc")
+        || s.starts_with("/var/lib/docker")
+        || s.starts_with("/var/lib/containers")
+        || s.starts_with("/var/lib/kubelet")
+}
+
+fn better_mount(new: &str, old: &str) -> bool {
+    if new == "/" {
+        return true;
+    }
+    if old == "/" {
+        return false;
+    }
+    new.len() < old.len()
+}
+
+fn disk_key(name: &str) -> String {
+    name.split_once('[')
+        .map(|(dev, _)| dev)
+        .unwrap_or(name)
+        .trim()
+        .to_string()
 }
 
 fn is_virtual(name: &str) -> bool {
@@ -532,12 +730,6 @@ fn pick_cpu_temp(sensors: &[SensorInfo]) -> Option<f32> {
         }
     }
     sensors.first().map(|s| s.temp_c)
-}
-
-fn collect_gpus(sensors: &[SensorInfo]) -> Vec<GpuInfo> {
-    let mut gpus = nvidia_gpus();
-    gpus.extend(sysfs_gpus(sensors));
-    gpus
 }
 
 fn nvidia_gpus() -> Vec<GpuInfo> {
@@ -631,6 +823,146 @@ fn gpu_busy(dev: &PathBuf, card: &PathBuf) -> Option<f32> {
         })
 }
 
+fn engine_is_primary(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("rcs") || n.contains("ccs") || n.contains("render") || n.contains("compute")
+}
+
+fn busy_pct(delta_ns: u64, elapsed_ns: u64) -> f32 {
+    if elapsed_ns == 0 {
+        return 0.0;
+    }
+    ((delta_ns as f64 / elapsed_ns as f64) * 100.0).clamp(0.0, 100.0) as f32
+}
+
+fn add_busy_file(map: &mut HashMap<String, u64>, key: String, path: &Path) {
+    if let Some(ns) = sysfs_u64(&path.to_path_buf()) {
+        map.insert(key, ns);
+    }
+}
+
+fn scan_engine_dir(dir: &Path, map: &mut HashMap<String, u64>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for ent in entries.flatten() {
+        let p = ent.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = ent.file_name().to_string_lossy().into_owned();
+        add_busy_file(map, name.clone(), &p.join("busy"));
+        add_busy_file(map, name.clone(), &p.join("busy_ns"));
+        if let Ok(inner) = std::fs::read_dir(&p) {
+            for e2 in inner.flatten() {
+                let p2 = e2.path();
+                let n2 = format!("{name}/{}", e2.file_name().to_string_lossy());
+                if p2.is_dir() {
+                    add_busy_file(map, n2.clone(), &p2.join("busy"));
+                    add_busy_file(map, n2.clone(), &p2.join("busy_ns"));
+                    if let Ok(inner2) = std::fs::read_dir(&p2) {
+                        for e3 in inner2.flatten() {
+                            let p3 = e3.path();
+                            let n3 = format!("{n2}/{}", e3.file_name().to_string_lossy());
+                            add_busy_file(map, n3.clone(), &p3.join("busy"));
+                            add_busy_file(map, n3, &p3.join("busy_ns"));
+                        }
+                    }
+                } else {
+                    let fname = e2.file_name();
+                    let fname = fname.to_string_lossy();
+                    if fname == "busy" || fname == "busy_ns" {
+                        add_busy_file(map, name.clone(), &p2);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn intel_engine_busy_ns(card: &Path, dev: &Path) -> HashMap<String, u64> {
+    let mut map = HashMap::new();
+    scan_engine_dir(&card.join("engine"), &mut map);
+    if let Ok(gts) = std::fs::read_dir(card.join("gt")) {
+        for gt in gts.flatten() {
+            scan_engine_dir(&gt.path().join("engines"), &mut map);
+        }
+    }
+    if let Ok(tiles) = std::fs::read_dir(dev) {
+        for tile in tiles.flatten() {
+            let tname = tile.file_name();
+            if !tname.to_string_lossy().starts_with("tile") {
+                continue;
+            }
+            if let Ok(gts) = std::fs::read_dir(tile.path()) {
+                for gt in gts.flatten() {
+                    if !gt.file_name().to_string_lossy().starts_with("gt") {
+                        continue;
+                    }
+                    scan_engine_dir(&gt.path().join("engines"), &mut map);
+                }
+            }
+        }
+    }
+    map
+}
+
+fn intel_util_percent(
+    card: &str,
+    now: &HashMap<String, u64>,
+    prev: &HashMap<String, u64>,
+    elapsed: Duration,
+) -> Option<f32> {
+    let elapsed_ns = elapsed.as_nanos() as u64;
+    if elapsed_ns < 300_000_000 {
+        return None;
+    }
+    let has_primary = now.keys().any(|k| engine_is_primary(k));
+    let mut best: Option<f32> = None;
+    for (eng, ns) in now {
+        if has_primary && !engine_is_primary(eng) {
+            continue;
+        }
+        let key = format!("{card}/{eng}");
+        let Some(prev_ns) = prev.get(&key).copied() else {
+            continue;
+        };
+        let pct = busy_pct(ns.saturating_sub(prev_ns), elapsed_ns);
+        best = Some(best.map_or(pct, |b| b.max(pct)));
+    }
+    best
+}
+
+fn rapl_energy_uj(want: &[&str]) -> Option<u64> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/powercap") else {
+        return None;
+    };
+    let mut fallback = None;
+    for ent in entries.flatten() {
+        let p = ent.path();
+        let fname = p.file_name()?.to_string_lossy().into_owned();
+        let name = sysfs_trim(&p.join("name").display().to_string()).to_ascii_lowercase();
+        let Some(uj) = sysfs_u64(&p.join("energy_uj")) else {
+            continue;
+        };
+        if want.iter().any(|w| name.contains(w)) {
+            return Some(uj);
+        }
+        if want.iter().any(|w| *w == "package")
+            && fname.contains("rapl")
+            && fname.ends_with(":0")
+            && !fname.contains(":0:")
+        {
+            fallback = Some(uj);
+        }
+    }
+    fallback
+}
+
+fn package_energy_uj() -> Option<u64> {
+    rapl_energy_uj(&["package"])
+}
+
 fn hwmon_cpu_power_w() -> Option<f32> {
     let Ok(entries) = std::fs::read_dir("/sys/class/hwmon") else {
         return None;
@@ -650,84 +982,6 @@ fn hwmon_cpu_power_w() -> Option<f32> {
         }
     }
     None
-}
-
-fn package_energy_uj() -> Option<u64> {
-    let Ok(entries) = std::fs::read_dir("/sys/class/powercap") else {
-        return None;
-    };
-    let mut fallback = None;
-    for ent in entries.flatten() {
-        let p = ent.path();
-        let fname = p.file_name()?.to_string_lossy().into_owned();
-        let name = sysfs_trim(&p.join("name").display().to_string()).to_ascii_lowercase();
-        let energy = sysfs_u64(&p.join("energy_uj"));
-        let Some(uj) = energy else {
-            continue;
-        };
-        if name.starts_with("package") {
-            return Some(uj);
-        }
-        if fname.contains("rapl") && fname.ends_with(":0") && !fname.contains(":0:") {
-            fallback = Some(uj);
-        }
-    }
-    fallback
-}
-
-fn sysfs_gpus(sensors: &[SensorInfo]) -> Vec<GpuInfo> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
-        return out;
-    };
-    for ent in entries.flatten() {
-        let name = ent.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("card") || name.contains('-') {
-            continue;
-        }
-        let card = ent.path();
-        let dev = card.join("device");
-        let vendor_id = sysfs_trim(&dev.join("vendor").display().to_string()).to_ascii_lowercase();
-        let vendor = match vendor_id.as_str() {
-            "0x1002" => "amd",
-            "0x8086" => "intel",
-            "0x10de" => continue,
-            _ => continue,
-        };
-        let hwmon = first_hwmon(&dev);
-        let mut temp = hwmon.as_ref().and_then(hwmon_temp_c);
-        if temp.is_none() {
-            let keys = match vendor {
-                "amd" => ["amdgpu", "edge", "junction"],
-                "intel" => ["i915", "xe", "igpu"],
-                _ => ["gpu", "drm", "igpu"],
-            };
-            temp = sensors.iter().find_map(|s| {
-                let l = s.label.to_ascii_lowercase();
-                keys.iter().find(|k| l.contains(*k)).map(|_| s.temp_c)
-            });
-        }
-        let power_w = hwmon.as_ref().and_then(hwmon_power_w);
-        let util = gpu_busy(&dev, &card);
-        let mem_used = sysfs_u64(&dev.join("mem_info_vram_used"));
-        let mem_total = sysfs_u64(&dev.join("mem_info_vram_total")).filter(|n| *n > 0);
-        let pretty = match vendor {
-            "amd" => "AMD graphics".into(),
-            "intel" => "Intel graphics".into(),
-            _ => format!("{vendor} GPU"),
-        };
-        out.push(GpuInfo {
-            name: pretty,
-            vendor: vendor.into(),
-            util_percent: util,
-            mem_used,
-            mem_total,
-            temp_c: temp,
-            power_w,
-        });
-    }
-    out
 }
 
 fn docker_info() -> DockerInfo {
@@ -786,5 +1040,35 @@ mod tests {
         assert!(!is_virtual_name("enp4s0"));
         assert!(!is_virtual_name("wlp0s20f3"));
         assert!(!is_virtual_name("eth0"));
+    }
+
+    #[test]
+    fn intel_engine_busy_pct() {
+        assert!((super::busy_pct(1_000_000_000, 1_000_000_000) - 100.0).abs() < 0.01);
+        assert!((super::busy_pct(200_000_000, 1_000_000_000) - 20.0).abs() < 0.01);
+        assert_eq!(super::busy_pct(0, 1_000_000_000), 0.0);
+        assert!(super::engine_is_primary("rcs0"));
+        assert!(super::engine_is_primary("ccs0"));
+        assert!(!super::engine_is_primary("bcs0"));
+    }
+
+    #[test]
+    fn disk_widget_keeps_real_volumes() {
+        use std::path::Path;
+        assert!(super::interesting_fs("ext4", Path::new("/")));
+        assert!(super::interesting_fs("xfs", Path::new("/mnt/data")));
+        assert!(super::interesting_fs("overlay", Path::new("/")));
+        assert!(!super::interesting_fs("overlay", Path::new("/var/lib/docker/overlay2/x")));
+        assert!(!super::interesting_fs("tmpfs", Path::new("/mnt")));
+        assert!(!super::noise_mount(Path::new("/")));
+        assert!(!super::noise_mount(Path::new("/media/coduos/backup")));
+        assert!(!super::noise_mount(Path::new("/DATA")));
+        assert!(!super::noise_mount(Path::new("/run/media/user/stick")));
+        assert!(super::noise_mount(Path::new("/boot/efi")));
+        assert!(super::noise_mount(Path::new("/run/user/1000")));
+        assert!(super::better_mount("/", "/home"));
+        assert!(super::better_mount("/mnt/disk", "/mnt/disk/bind"));
+        assert_eq!(super::disk_key("/dev/nvme0n1p2[/@home]"), "/dev/nvme0n1p2");
+        assert_eq!(super::disk_key("/dev/sdb1"), "/dev/sdb1");
     }
 }
