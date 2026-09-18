@@ -1,7 +1,11 @@
 <script lang="ts">
-  import type { ServiceForm } from '../lib/compose';
+  import { resolveVolumeHost, type EnvRow, type ServiceForm } from '../lib/compose';
 
-  let { service = $bindable() } = $props<{ service: ServiceForm }>();
+  let { service = $bindable(), appDir = '', env = [] } = $props<{
+    service: ServiceForm;
+    appDir?: string;
+    env?: EnvRow[];
+  }>();
 
   const extraKeys = $derived(Object.keys(service.extra).sort());
 
@@ -65,10 +69,16 @@
   {:else}
     <div class="kv-head two"><span>Host</span><span>Container</span><span></span></div>
     {#each service.volumes as v, i}
-      <div class="kv-row two">
-        <input bind:value={v.host} placeholder="/DATA/Media" />
-        <input bind:value={v.container} placeholder="/Media" />
-        <button type="button" class="close-x" onclick={() => (service.volumes = drop(service.volumes, i))}>×</button>
+      {@const hostHint = resolveVolumeHost(appDir, v.host, env)}
+      <div class="vol-item">
+        <div class="kv-row two">
+          <input bind:value={v.host} placeholder="/DATA/Media" />
+          <input bind:value={v.container} placeholder="/Media" />
+          <button type="button" class="close-x" onclick={() => (service.volumes = drop(service.volumes, i))}>×</button>
+        </div>
+        {#if hostHint}
+          <p class="env-host">On this computer: <code>{hostHint}</code></p>
+        {/if}
       </div>
     {/each}
   {/if}

@@ -32,6 +32,7 @@ export type AppRecord = {
   icon_url?: string | null;
   web_port?: number | null;
   created_at?: string;
+  app_dir?: string;
   status: AppStatus;
 };
 

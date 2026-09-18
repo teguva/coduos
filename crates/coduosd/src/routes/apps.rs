@@ -40,6 +40,7 @@ struct AppOut {
     icon_url: Option<String>,
     web_port: Option<i64>,
     created_at: String,
+    app_dir: String,
     status: ComposeStatus,
 }
 
@@ -52,7 +53,7 @@ struct AppIn {
     web_port: Option<i64>,
 }
 
-fn to_out(row: AppRow, status: ComposeStatus) -> AppOut {
+fn to_out(row: AppRow, status: ComposeStatus, app_dir: String) -> AppOut {
     AppOut {
         id: row.id,
         name: row.name,
@@ -60,6 +61,7 @@ fn to_out(row: AppRow, status: ComposeStatus) -> AppOut {
         icon_url: row.icon_url,
         web_port: row.web_port,
         created_at: row.created_at,
+        app_dir,
         status,
     }
 }
@@ -67,13 +69,14 @@ fn to_out(row: AppRow, status: ComposeStatus) -> AppOut {
 async fn load_app(state: &AppState, id: &str) -> Result<AppOut, ApiError> {
     let row = state.db.get_app(id)?.ok_or(ApiError::NotFound)?;
     let cfg = state.config.read().await;
+    let app_dir = cfg.apps_dir().join(&row.id).display().to_string();
     let mut status =
         docker::inspect_status(&cfg.apps_dir(), id, row.last_error.as_deref()).await;
     drop(cfg);
     if let Some(job) = state.job(id) {
         status = job.overlay(status);
     }
-    Ok(to_out(row, status))
+    Ok(to_out(row, status, app_dir))
 }
 
 fn busy_conflict() -> ApiError {
@@ -110,7 +113,8 @@ async fn list(State(state): State<AppState>, jar: CookieJar) -> Result<Json<Vec<
         if let Some(job) = state.job(&row.id) {
             status = job.overlay(status);
         }
-        out.push(to_out(row, status));
+        let app_dir = apps_dir.join(&row.id).display().to_string();
+        out.push(to_out(row, status, app_dir));
     }
     Ok(Json(out))
 }

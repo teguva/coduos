@@ -263,6 +263,8 @@ fn write_dotenv(dir: &Path, yaml: &str) -> Result<(), ApiError> {
             }
         }
     }
+    ensure_relative_host_dirs(dir, yaml, &env)?;
+    expand_relative_env_paths(dir, &mut env);
     let path = dir.join(".env");
     if env.is_empty() {
         if path.exists() {
@@ -278,6 +280,75 @@ fn write_dotenv(dir: &Path, yaml: &str) -> Result<(), ApiError> {
     let mut perms = std::fs::metadata(&path)?.permissions();
     perms.set_mode(0o600);
     std::fs::set_permissions(&path, perms)?;
+    Ok(())
+}
+
+/// Compose-relative host path (`./library`) resolved against the project directory.
+pub fn relative_project_path(project: &Path, value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    let rest = value.strip_prefix("./")?;
+    let rest = rest.trim_end_matches('/');
+    if rest.is_empty() {
+        return Some(project.to_path_buf());
+    }
+    if rest.split('/').any(|p| p.is_empty() || p == "." || p == "..") {
+        return None;
+    }
+    Some(project.join(rest))
+}
+
+fn expand_relative_env_paths(dir: &Path, env: &mut BTreeMap<String, String>) {
+    for val in env.values_mut() {
+        if let Some(abs) = relative_project_path(dir, val) {
+            *val = abs.to_string_lossy().into_owned();
+        }
+    }
+}
+
+fn volume_host_paths(yaml: &str) -> Vec<String> {
+    let Ok(parsed) = serde_yaml::from_str::<serde_yaml::Value>(yaml) else {
+        return Vec::new();
+    };
+    let Some(services) = parsed.get("services").and_then(|s| s.as_mapping()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (_, svc) in services {
+        let Some(vols) = svc.get("volumes").and_then(|v| v.as_sequence()) else {
+            continue;
+        };
+        for vol in vols {
+            if let Some(s) = vol.as_str() {
+                if let Some((host, _)) = s.split_once(':') {
+                    out.push(host.to_string());
+                }
+            } else if let Some(src) = vol.get("source").and_then(|s| s.as_str()) {
+                out.push(src.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn ensure_relative_host_dirs(
+    dir: &Path,
+    yaml: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<(), ApiError> {
+    let mut paths = Vec::new();
+    for val in env.values() {
+        if let Some(p) = relative_project_path(dir, val) {
+            paths.push(p);
+        }
+    }
+    for host in volume_host_paths(yaml) {
+        if let Some(p) = relative_project_path(dir, &host) {
+            paths.push(p);
+        }
+    }
+    for p in paths {
+        std::fs::create_dir_all(&p)?;
+    }
     Ok(())
 }
 
@@ -710,6 +781,59 @@ mod tests {
             listener.local_addr().unwrap().port()
         };
         assert!(!wait_for_tcp(port, Duration::from_millis(500)).await);
+    }
+
+    #[test]
+    fn relative_project_path_library() {
+        let dir = PathBuf::from("/var/lib/coduos/apps/immich");
+        assert_eq!(
+            relative_project_path(&dir, "./library").unwrap(),
+            PathBuf::from("/var/lib/coduos/apps/immich/library")
+        );
+        assert_eq!(
+            relative_project_path(&dir, "./library/").unwrap(),
+            PathBuf::from("/var/lib/coduos/apps/immich/library")
+        );
+        assert!(relative_project_path(&dir, "../escape").is_none());
+        assert!(relative_project_path(&dir, "./../x").is_none());
+        assert!(relative_project_path(&dir, "v3").is_none());
+        assert!(relative_project_path(&dir, "/abs").is_none());
+    }
+
+    #[test]
+    fn write_compose_creates_relative_upload_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "coduos-compose-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let yaml = r#"
+services:
+  server:
+    image: test
+    volumes:
+      - ${UPLOAD_LOCATION}:/data
+x-coduos:
+  env:
+    UPLOAD_LOCATION: ./library
+"#;
+        let result = write_compose(&dir, "immich", yaml);
+        let lib = dir.join("immich").join("library");
+        let lib_ok = lib.is_dir();
+        let env = std::fs::read_to_string(dir.join("immich").join(".env")).ok();
+        let abs = lib.display().to_string();
+        let _ = std::fs::remove_dir_all(&dir);
+        result.unwrap();
+        assert!(lib_ok, "expected {abs} to be created");
+        let env = env.expect(".env");
+        assert!(
+            env.contains(&format!("UPLOAD_LOCATION={abs}")),
+            "expected absolute UPLOAD_LOCATION in {env}"
+        );
     }
 }
 

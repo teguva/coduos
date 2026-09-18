@@ -354,6 +354,54 @@ export function parseDotEnv(text: string): EnvRow[] {
   return out;
 }
 
+export function stringifyDotEnv(rows: EnvRow[]): string {
+  const lines: string[] = [];
+  for (const { key, value } of rows) {
+    const k = key.trim();
+    if (!k) continue;
+    lines.push(dotenvLine(k, value));
+  }
+  return lines.length ? lines.join('\n') + '\n' : '';
+}
+
+function dotenvLine(key: string, value: string): string {
+  if (!value) return `${key}=`;
+  if (/[\s#"']/.test(value) || value.includes('\\')) {
+    const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return `${key}="${escaped}"`;
+  }
+  return `${key}=${value}`;
+}
+
+export function envFileBody(stack: StackForm): string {
+  return stringifyDotEnv(mergeEnv(interpolationsFromStack(stack), stack.dotEnv));
+}
+
+export function classifyComposeFile(name: string, text: string): 'yaml' | 'env' | 'unknown' {
+  const n = (name.toLowerCase().replace(/\\/g, '/').split('/').pop() || '').trim();
+  if (n === '.env' || n.endsWith('.env') || /\.env\./.test(n) || n.endsWith('.env.txt')) {
+    return 'env';
+  }
+  if (n.endsWith('.yml') || n.endsWith('.yaml') || n.includes('compose')) return 'yaml';
+  const trimmed = text.trim();
+  if (!trimmed) return 'unknown';
+  if (/^(services|version|name|x-coduos|x-casaos|networks|volumes)\s*:/m.test(trimmed)) {
+    return 'yaml';
+  }
+  if (parseDotEnv(trimmed).length) return 'env';
+  return 'unknown';
+}
+
+export function downloadText(filename: string, body: string, mime = 'text/plain;charset=utf-8') {
+  const blob = new Blob([body], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 /** Later lists win. First-seen key order is kept. Empty keys are skipped. */
 export function mergeEnv(...lists: EnvRow[][]): EnvRow[] {
   const map = new Map<string, string>();
@@ -367,6 +415,39 @@ export function mergeEnv(...lists: EnvRow[][]): EnvRow[] {
     }
   }
   return order.map((key) => ({ key, value: map.get(key) ?? '' }));
+}
+
+/** Compose-relative host path (`./library`) against the app’s project directory. */
+export function resolveRelativeHostPath(appDir: string | undefined, value: string): string | null {
+  const v = value.trim();
+  if (!v.startsWith('./')) return null;
+  const rest = v.slice(2).replace(/\/+$/, '');
+  if (!rest || rest.split('/').some((p) => !p || p === '.' || p === '..')) return null;
+  const base = (appDir || '').replace(/\/+$/, '');
+  if (!base) return `${rest} (in this app’s folder after save)`;
+  return `${base}/${rest}`;
+}
+
+export function expandInterpolations(text: string, env: EnvRow[]): string {
+  const map = new Map(env.map((e) => [e.key.trim(), e.value]));
+  return text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (full, key, def) => {
+    if (map.has(key)) return map.get(key) ?? '';
+    if (def !== undefined) return def;
+    return full;
+  });
+}
+
+/** Host folder Docker will bind, after ${VAR} and ./ relative paths. */
+export function resolveVolumeHost(
+  appDir: string | undefined,
+  host: string,
+  env: EnvRow[]
+): string | null {
+  const expanded = expandInterpolations(host.trim(), env).trim();
+  if (expanded.startsWith('./')) return resolveRelativeHostPath(appDir, expanded);
+  if (expanded !== host.trim() && expanded.startsWith('/')) return expanded;
+  if (host.trim().startsWith('./')) return resolveRelativeHostPath(appDir, host);
+  return null;
 }
 
 /** Whole-value pointer like `${DB_PASSWORD}` — hide it when that key is already shared. */

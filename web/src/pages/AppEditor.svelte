@@ -13,9 +13,13 @@
   } from '../lib/apps';
   import {
     addService,
+    classifyComposeFile,
+    downloadText,
+    envFileBody,
     exampleStack,
     interpolationsFromStack,
     mergeEnv,
+    parseDotEnv,
     slug,
     stackEnvCount,
     stackToYaml,
@@ -25,6 +29,7 @@
   import AppWindow from '../components/AppWindow.svelte';
   import ComposeEditor from '../components/ComposeEditor.svelte';
   import ComposeEnv from '../components/ComposeEnv.svelte';
+  import Confirm from '../components/Confirm.svelte';
   import InfoTip from '../components/InfoTip.svelte';
   import ProgressStrip from '../components/ProgressStrip.svelte';
   import StatusPill from '../components/StatusPill.svelte';
@@ -38,10 +43,14 @@
   let pane = $state<'app' | 'services' | 'env'>('app');
   let tab = $state(0);
   let appId = $state('');
+  let appDir = $state('');
   let idCustom = $state(false);
   let logs = $state('');
   let error = $state('');
+  let notice = $state('');
   let busy = $state('');
+  let importEl: HTMLInputElement | undefined;
+  let pendingImport = $state<{ name: string; text: string }[] | null>(null);
   let needsUpdate = $state(false);
   let status = $state<AppStatus>({
     running: false,
@@ -128,6 +137,7 @@
     if (app.icon_url) stack.iconUrl = app.icon_url;
     if (app.web_port && !stack.webPort) stack.webPort = String(app.web_port);
     appId = app.id;
+    if (app.app_dir) appDir = app.app_dir;
     status = overlayJob(app.status, jobs[app.id]);
   }
 
@@ -145,6 +155,127 @@
 
   function suggestedId() {
     return slug(stack.title);
+  }
+
+  function fileBase() {
+    return (appId.trim() || suggestedId() || 'app').replace(/[^a-z0-9._-]+/gi, '-');
+  }
+
+  function currentYaml() {
+    if (mode === 'form') {
+      stack.dotEnv = mergeEnv(interpolationsFromStack(stack), stack.dotEnv);
+      yaml = stackToYaml(stack);
+    }
+    return yaml;
+  }
+
+  function exportYaml() {
+    notice = '';
+    const body = currentYaml();
+    if (!body.trim()) {
+      error = 'Nothing to export yet.';
+      return;
+    }
+    downloadText(`${fileBase()}-compose.yml`, body, 'text/yaml;charset=utf-8');
+  }
+
+  function exportEnv() {
+    notice = '';
+    if (mode === 'form') {
+      stack.dotEnv = mergeEnv(interpolationsFromStack(stack), stack.dotEnv);
+    } else {
+      try {
+        const next = yamlToStack(yaml);
+        next.dotEnv = mergeEnv(next.dotEnv, stack.dotEnv);
+        stack = next;
+      } catch (err: any) {
+        error = err.message || 'YAML is not valid.';
+        return;
+      }
+    }
+    const body = envFileBody(stack);
+    if (!body.trim()) {
+      error = 'No environment variables to export.';
+      return;
+    }
+    downloadText(`${fileBase()}.env`, body);
+  }
+
+  async function onImportFiles(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const files = [...(input.files || [])];
+    input.value = '';
+    error = '';
+    notice = '';
+    if (!files.length) return;
+    const loaded: { name: string; text: string }[] = [];
+    for (const file of files) {
+      if (file.size > 2 * 1024 * 1024) {
+        error = `${file.name} is larger than 2 MB.`;
+        return;
+      }
+      loaded.push({ name: file.name, text: await file.text() });
+    }
+    const hasYaml = loaded.some((f) => classifyComposeFile(f.name, f.text) === 'yaml');
+    if (id && hasYaml) {
+      pendingImport = loaded;
+      return;
+    }
+    applyImport(loaded);
+  }
+
+  function applyImport(files: { name: string; text: string }[]) {
+    pendingImport = null;
+    const yamlFiles = files.filter((f) => classifyComposeFile(f.name, f.text) === 'yaml');
+    const envFiles = files.filter((f) => classifyComposeFile(f.name, f.text) === 'env');
+    const unknown = files.filter((f) => classifyComposeFile(f.name, f.text) === 'unknown');
+    if (unknown.length && !yamlFiles.length && !envFiles.length) {
+      error = `Could not read ${unknown[0].name} as compose YAML or .env.`;
+      return;
+    }
+    const prevEnv = stack.dotEnv;
+    const names: string[] = [];
+    if (yamlFiles.length) {
+      const src = yamlFiles[yamlFiles.length - 1];
+      try {
+        const next = yamlToStack(src.text);
+        if (!next.services.some((s) => s.image.trim())) {
+          error = `${src.name} has no services with a Docker image.`;
+          return;
+        }
+        next.dotEnv = mergeEnv(next.dotEnv, prevEnv);
+        stack = next;
+        yaml = src.text.endsWith('\n') ? src.text : src.text + '\n';
+        if (!id && !idCustom && next.title) appId = slug(next.title);
+        names.push(src.name);
+      } catch (err: any) {
+        error = `${src.name} is not valid YAML: ${err.message || err}`;
+        return;
+      }
+    }
+    if (envFiles.length) {
+      let rows = yamlFiles.length ? stack.dotEnv : prevEnv;
+      for (const src of envFiles) {
+        const parsed = parseDotEnv(src.text);
+        if (!parsed.length) {
+          error = `${src.name} had no KEY=value lines.`;
+          return;
+        }
+        rows = mergeEnv(interpolationsFromStack(stack), rows, parsed);
+        names.push(src.name);
+      }
+      stack.dotEnv = rows;
+      if (mode === 'yaml') yaml = stackToYaml(stack);
+    }
+    if (yamlFiles.length && mode === 'form') {
+      pane = envFiles.length ? 'env' : stack.services.length > 1 ? 'services' : 'app';
+    } else if (envFiles.length && mode === 'form') {
+      pane = 'env';
+    }
+    notice = `Imported ${names.join(' and ')}. Save to keep the change.`;
+    if (unknown.length) {
+      notice += ` Skipped ${unknown.map((f) => f.name).join(', ')}.`;
+    }
   }
 
   $effect(() => {
@@ -213,6 +344,7 @@
       if (id) {
         const app = await api<AppRecord>('/api/apps/' + id, { method: 'PUT', body: JSON.stringify(body) });
         status = app.status;
+        if (app.app_dir) appDir = app.app_dir;
         if (app.status.installed) needsUpdate = true;
       } else {
         const app = await api<AppRecord>('/api/apps', { method: 'POST', body: JSON.stringify(body) });
@@ -295,6 +427,28 @@
   {/if}
 {/if}
 {#if error}<div class="err">{error}</div>{/if}
+{#if notice}<p class="hint">{notice}</p>{/if}
+
+<div class="compose-io">
+  <button type="button" class="btn secondary compact" onclick={() => importEl?.click()}>
+    <UiIcon name="upload" size={18} /> Import
+  </button>
+  <input
+    bind:this={importEl}
+    type="file"
+    hidden
+    multiple
+    accept=".yml,.yaml,.env,text/yaml,text/plain,.txt,application/yaml"
+    onchange={onImportFiles}
+  />
+  <button type="button" class="btn secondary compact" onclick={exportYaml}>
+    <UiIcon name="download" size={18} /> Export YAML
+  </button>
+  <button type="button" class="btn secondary compact" onclick={exportEnv}>
+    <UiIcon name="download" size={18} /> Export .env
+  </button>
+  <p class="hint">Import compose.yml and .env together (Immich ships both). Export downloads the files Docker Compose uses.</p>
+</div>
 
 <form onsubmit={save}>
   {#if mode === 'form'}
@@ -322,7 +476,7 @@
           {:else}
             <label class="field">
               <span class="field-head">Id
-                <InfoTip label="About the app id" text="Folder and Docker name. The title can change later; this cannot." />
+                <InfoTip label="About the app id" text="Folder and Docker name. Relative paths like ./library live inside this folder. The title can change later; this cannot." />
               </span>
               <input value={appId} disabled />
             </label>
@@ -361,6 +515,9 @@
         {#if extras.length}
           <p class="hint">Kept from YAML: {extras.join(', ')}</p>
         {/if}
+        {#if appDir}
+          <p class="hint">App folder on this computer: <code>{appDir}</code>. Relative host paths like <code>./library</code> are created inside it — Files only lists Home and mounted disks.</p>
+        {/if}
         <p class="hint">{id ? (status.message || '') : 'Name the app, then set services and environment.'}</p>
       </section>
     {:else if pane === 'services'}
@@ -386,13 +543,13 @@
         <div class="svc-body">
           {#key tab}
             {#if svc}
-              <ComposeEditor bind:service={stack.services[tab]} />
+              <ComposeEditor bind:service={stack.services[tab]} {appDir} env={stack.dotEnv} />
             {/if}
           {/key}
         </div>
       </div>
     {:else}
-      <ComposeEnv bind:stack />
+      <ComposeEnv bind:stack {appDir} fileBase={fileBase()} />
     {/if}
   {:else}
     <label class="field"><span>compose.yml</span><textarea class="yaml-editor" bind:value={yaml} required></textarea></label>
@@ -419,3 +576,13 @@
   <pre class="logs">{logs || 'Click refresh to load logs.'}</pre>
 {/if}
 </AppWindow>
+
+{#if pendingImport}
+  <Confirm
+    title="Replace compose YAML?"
+    body="The imported file replaces this app’s compose. Matching environment keys are kept. Save to write it to disk."
+    confirmLabel="Replace"
+    onConfirm={() => applyImport(pendingImport || [])}
+    onCancel={() => (pendingImport = null)}
+  />
+{/if}

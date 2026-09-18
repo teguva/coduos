@@ -1,15 +1,20 @@
 <script lang="ts">
   import {
+    downloadText,
+    envFileBody,
     interpolationsFromStack,
     mergeEnv,
     parseDotEnv,
+    resolveRelativeHostPath,
     showServiceEnv,
     type StackForm
   } from '../lib/compose';
   import UiIcon from './UiIcon.svelte';
 
-  let { stack = $bindable() } = $props<{
+  let { stack = $bindable(), appDir = '', fileBase = 'app' } = $props<{
     stack: StackForm;
+    appDir?: string;
+    fileBase?: string;
   }>();
 
   let query = $state('');
@@ -144,6 +149,16 @@
     }
     stack.dotEnv = mergeEnv(interpolationsFromStack(stack), stack.dotEnv, parsed);
   }
+
+  function exportEnv() {
+    fileErr = '';
+    const body = envFileBody(stack);
+    if (!body.trim()) {
+      fileErr = 'No environment variables to export.';
+      return;
+    }
+    downloadText(`${fileBase}.env`, body);
+  }
 </script>
 
 <div class="env-toolbar">
@@ -161,7 +176,7 @@
     </select>
   </label>
   <button type="button" class="btn secondary compact" onclick={() => fileEl?.click()}>
-    <UiIcon name="upload" size={18} /> Upload .env
+    <UiIcon name="upload" size={18} /> Import .env
   </button>
   <input
     bind:this={fileEl}
@@ -170,6 +185,9 @@
     accept=".env,text/plain,.txt"
     onchange={onEnvFile}
   />
+  <button type="button" class="btn secondary compact" onclick={exportEnv}>
+    <UiIcon name="download" size={18} /> Export .env
+  </button>
   <button type="button" class="btn secondary compact" onclick={add}>
     <UiIcon name="add" size={18} /> Add variable
   </button>
@@ -177,10 +195,11 @@
 
 <p class="hint">
   {#if namedShared === 0 && namedSvc === 0}
-    Shared variables fill the image version and host folders. Upload a .env (Immich includes one) or add a variable.
+    Shared variables fill the image version and host folders. Import a .env (Immich includes one) or add a variable.
   {:else}
     {namedShared + namedSvc} variable{namedShared + namedSvc === 1 ? '' : 's'} — image tags, upload folders, and container settings.
   {/if}
+  Values like <code>./library</code> are created next to this app, not in Files. Put photos on a mounted disk (Storage) if you want them there.
 </p>
 {#if envFiles.length}
   <p class="hint">This stack also reads {envFiles.join(', ')}. Upload that file so passwords and paths show up here.</p>
@@ -192,22 +211,28 @@
     <h3>Shared</h3>
     <div class="kv-head env"><span>Where</span><span>Key</span><span>Value</span><span></span></div>
     {#each sharedRows as { ei } (`shared:${ei}`)}
-      <div class="kv-row env">
-        <select
-          value="shared"
-          onchange={(e) => moveShared(ei, e.currentTarget.value)}
-          aria-label="Where"
-        >
-          <option value="shared">Shared</option>
-          {#each stack.services as svc, i}
-            <option value={String(i)}>{svc.serviceName || `service-${i + 1}`}</option>
-          {/each}
-        </select>
-        <input bind:value={stack.dotEnv[ei].key} placeholder="UPLOAD_LOCATION" spellcheck="false" />
-        <input bind:value={stack.dotEnv[ei].value} placeholder="value" spellcheck="false" />
-        <button type="button" class="close-x" title="Remove" onclick={() => dropShared(ei)}>
-          <UiIcon name="close" size={16} />
-        </button>
+      {@const hostHint = resolveRelativeHostPath(appDir, stack.dotEnv[ei].value)}
+      <div class="env-item">
+        <div class="kv-row env">
+          <select
+            value="shared"
+            onchange={(e) => moveShared(ei, e.currentTarget.value)}
+            aria-label="Where"
+          >
+            <option value="shared">Shared</option>
+            {#each stack.services as svc, i}
+              <option value={String(i)}>{svc.serviceName || `service-${i + 1}`}</option>
+            {/each}
+          </select>
+          <input bind:value={stack.dotEnv[ei].key} placeholder="UPLOAD_LOCATION" spellcheck="false" />
+          <input bind:value={stack.dotEnv[ei].value} placeholder="value" spellcheck="false" />
+          <button type="button" class="close-x" title="Remove" onclick={() => dropShared(ei)}>
+            <UiIcon name="close" size={16} />
+          </button>
+        </div>
+        {#if hostHint}
+          <p class="env-host">On this computer: <code>{hostHint}</code></p>
+        {/if}
       </div>
     {/each}
   </div>
@@ -220,22 +245,28 @@
       <h3>{svc.serviceName || `service-${si + 1}`}</h3>
       <div class="kv-head env"><span>Where</span><span>Key</span><span>Value</span><span></span></div>
       {#each rows as { ei } (`svc:${si}:${ei}`)}
-        <div class="kv-row env">
-          <select
-            value={String(si)}
-            onchange={(e) => moveSvc(si, ei, e.currentTarget.value)}
-            aria-label="Where"
-          >
-            <option value="shared">Shared</option>
-            {#each stack.services as other, i}
-              <option value={String(i)}>{other.serviceName || `service-${i + 1}`}</option>
-            {/each}
-          </select>
-          <input bind:value={stack.services[si].env[ei].key} placeholder="POSTGRES_INITDB_ARGS" spellcheck="false" />
-          <input bind:value={stack.services[si].env[ei].value} placeholder="value" spellcheck="false" />
-          <button type="button" class="close-x" title="Remove" onclick={() => dropSvc(si, ei)}>
-            <UiIcon name="close" size={16} />
-          </button>
+        {@const hostHint = resolveRelativeHostPath(appDir, stack.services[si].env[ei].value)}
+        <div class="env-item">
+          <div class="kv-row env">
+            <select
+              value={String(si)}
+              onchange={(e) => moveSvc(si, ei, e.currentTarget.value)}
+              aria-label="Where"
+            >
+              <option value="shared">Shared</option>
+              {#each stack.services as other, i}
+                <option value={String(i)}>{other.serviceName || `service-${i + 1}`}</option>
+              {/each}
+            </select>
+            <input bind:value={stack.services[si].env[ei].key} placeholder="POSTGRES_INITDB_ARGS" spellcheck="false" />
+            <input bind:value={stack.services[si].env[ei].value} placeholder="value" spellcheck="false" />
+            <button type="button" class="close-x" title="Remove" onclick={() => dropSvc(si, ei)}>
+              <UiIcon name="close" size={16} />
+            </button>
+          </div>
+          {#if hostHint}
+            <p class="env-host">On this computer: <code>{hostHint}</code></p>
+          {/if}
         </div>
       {/each}
     </div>
