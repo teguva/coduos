@@ -55,6 +55,8 @@
     size: number;
   } | null>(null);
   let mntFolder = $state('');
+  let mntCustom = $state('/DATA');
+  let mntWhere = $state<'coduos' | 'custom'>('coduos');
   let mntFilesName = $state('');
   let mntAddFiles = $state(true);
   let mntAuto = $state(true);
@@ -141,11 +143,22 @@
   }
 
   function mountPath() {
+    if (mntWhere === 'custom') {
+      const raw = mntCustom.trim() || '/DATA';
+      return raw.startsWith('/') ? raw.replace(/\/+$/, '') || '/' : '/' + raw.replace(/^\/+|\/+$/g, '');
+    }
     return '/media/coduos/' + folderSlug(mntFolder || 'disk');
+  }
+
+  function customPathOk() {
+    const p = mntCustom.trim();
+    return p.startsWith('/') && p.replace(/\/+$/, '').length > 1 && !p.includes('..');
   }
 
   function openMount(p: Partition) {
     mntFolder = folderSlug(p.label || p.name || 'disk');
+    mntCustom = '/DATA';
+    mntWhere = 'coduos';
     mntFilesName = p.label || p.name || 'Disk';
     mntAddFiles = true;
     mntAuto = p.auto_mount !== false;
@@ -194,7 +207,8 @@
         method: 'POST',
         body: JSON.stringify({
           device,
-          folder: folderSlug(mntFolder || 'disk'),
+          folder: mntWhere === 'coduos' ? folderSlug(mntFolder || 'disk') : undefined,
+          mountpoint: mntWhere === 'custom' ? mntCustom.trim() : undefined,
           files_name: mntFilesName.trim() || undefined,
           add_to_files: mntAddFiles,
           auto_mount: mntAuto,
@@ -476,16 +490,35 @@
         {mountDlg.device}{#if mountDlg.fstype} · {mountDlg.fstype}{/if} · {bytes(mountDlg.size)}
         {#if mountDlg.uuid}<br />UUID {mountDlg.uuid}{/if}
       </p>
-      <label class="field">
-        <span class="field-head">
-          Folder name
-          <InfoTip
-            label="Where this mounts"
-            text="CoduOS mounts by UUID under /media/coduos so the same disk keeps this folder after reboot, even if the /dev name changes."
-          />
-        </span>
-        <input bind:value={mntFolder} placeholder="backup" />
-      </label>
+      <span class="field-head">
+        Where this mounts
+        <InfoTip
+          label="Where this mounts"
+          text={mntWhere === 'custom'
+            ? 'Use an absolute folder such as /DATA. CoduOS creates it if it is missing. Files already in that folder stay on the system disk and are hidden until you unmount — you do not need to delete them.'
+            : 'CoduOS mounts by UUID under /media/coduos so the same disk keeps this folder after reboot, even if the /dev name changes.'}
+        />
+      </span>
+      <div class="segment">
+        <button type="button" class="btn secondary" class:active={mntWhere === 'coduos'} onclick={() => (mntWhere = 'coduos')}>
+          CoduOS folder
+        </button>
+        <button type="button" class="btn secondary" class:active={mntWhere === 'custom'} onclick={() => (mntWhere = 'custom')}>
+          Custom path
+        </button>
+      </div>
+      {#if mntWhere === 'coduos'}
+        <label class="field">
+          <span>Folder name</span>
+          <input bind:value={mntFolder} placeholder="backup" />
+        </label>
+      {:else}
+        <label class="field">
+          <span>Folder path</span>
+          <input bind:value={mntCustom} placeholder="/DATA" />
+        </label>
+        <p class="hint">The folder is created if it is missing. Existing files stay on the system disk and are hidden while this drive is mounted — you do not need to delete them.</p>
+      {/if}
       <div class="mount-path">{mountPath()}</div>
       <label class="field">
         <span>Name in Files</span>
@@ -506,7 +539,7 @@
       <p>Linux filesystems keep their own permissions. FAT, exFAT, and NTFS are mounted so the CoduOS user can write.</p>
       <div class="row">
         <button class="btn secondary" onclick={() => (mountDlg = null)}>Cancel</button>
-        <button class="btn" disabled={!!busy} onclick={doMount}>Mount</button>
+        <button class="btn" disabled={!!busy || (mntWhere === 'custom' && !customPathOk())} onclick={doMount}>Mount</button>
       </div>
     </div>
   </div>

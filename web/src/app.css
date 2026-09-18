@@ -1673,6 +1673,8 @@ details.advanced[open] > summary::before { content: "▾ "; }
   background: var(--bg-solid);
   border-radius: 16px 16px 0 0;
   padding: 20px 18px 24px;
+  max-height: min(92vh, 760px);
+  overflow-y: auto;
 }
 .confirm-card h3 { margin: 0 0 8px; }
 

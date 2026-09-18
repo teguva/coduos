@@ -38,6 +38,7 @@ struct DeviceIn {
 struct MountIn {
     device: String,
     folder: Option<String>,
+    mountpoint: Option<String>,
     files_name: Option<String>,
     add_to_files: Option<bool>,
     auto_mount: Option<bool>,
@@ -57,6 +58,7 @@ async fn mount(
         &body.device,
         &MountOpts {
             folder: body.folder,
+            mountpoint: body.mountpoint,
             files_label: body.files_name,
             add_to_files: body.add_to_files.unwrap_or(true),
             auto_mount: body.auto_mount.unwrap_or(true),

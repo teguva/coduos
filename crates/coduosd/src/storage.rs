@@ -486,6 +486,7 @@ fn mount_opts(fstype: &str, read_only: bool) -> String {
 #[derive(Debug, Clone)]
 pub struct MountOpts {
     pub folder: Option<String>,
+    pub mountpoint: Option<String>,
     pub files_label: Option<String>,
     pub add_to_files: bool,
     pub auto_mount: bool,
@@ -496,12 +497,102 @@ impl Default for MountOpts {
     fn default() -> Self {
         Self {
             folder: None,
+            mountpoint: None,
             files_label: None,
             add_to_files: false,
             auto_mount: true,
             read_only: false,
         }
     }
+}
+
+fn parse_custom_mountpoint(raw: &str) -> Result<PathBuf, ApiError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(ApiError::BadRequest(
+            "enter an absolute folder such as /DATA".into(),
+        ));
+    }
+    if !raw.starts_with('/') {
+        return Err(ApiError::BadRequest(
+            "path must start with /, for example /DATA".into(),
+        ));
+    }
+    let mut dest = PathBuf::from("/");
+    for c in Path::new(raw).components() {
+        match c {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(s) => dest.push(s),
+            std::path::Component::CurDir | std::path::Component::ParentDir => {
+                return Err(ApiError::BadRequest("path must not contain . or ..".into()));
+            }
+            std::path::Component::Prefix(_) => {
+                return Err(ApiError::BadRequest(
+                    "path must start with /, for example /DATA".into(),
+                ));
+            }
+        }
+    }
+    if dest == Path::new("/") {
+        return Err(ApiError::BadRequest("cannot mount at /".into()));
+    }
+    Ok(dest)
+}
+
+fn validate_custom_mountpoint(raw: &str, data_dir: &Path) -> Result<PathBuf, ApiError> {
+    let dest = parse_custom_mountpoint(raw)?;
+    let s = dest.display().to_string();
+    if s == MEDIA_ROOT || s == "/media" || s == "/mnt" {
+        return Err(ApiError::BadRequest(
+            "choose a folder inside that location, not the location itself".into(),
+        ));
+    }
+    if is_system_mount(&s, data_dir) {
+        return Err(ApiError::BadRequest(
+            "that path is used by the system and cannot be a mount point".into(),
+        ));
+    }
+    if dest.is_file() {
+        return Err(ApiError::BadRequest(
+            "that path is a file, not a folder".into(),
+        ));
+    }
+    Ok(dest)
+}
+
+fn resolve_mount_dest(
+    cfg: &Config,
+    part: &Partition,
+    opts: &MountOpts,
+) -> Result<PathBuf, ApiError> {
+    if let Some(raw) = opts
+        .mountpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return validate_custom_mountpoint(raw, &cfg.data_dir);
+    }
+    let fallback = if part.label.is_empty() {
+        safe_label(&part.uuid)
+    } else {
+        safe_label(&part.label)
+    };
+    let folder = match opts.folder.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => safe_label(raw),
+        None => cfg
+            .storage_mounts
+            .iter()
+            .find(|m| m.uuid == part.uuid)
+            .and_then(|m| {
+                m.mountpoint
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or(fallback),
+    };
+    Ok(PathBuf::from(MEDIA_ROOT).join(folder))
 }
 
 pub fn mount_device(cfg: &mut Config, config_path: &Path, device: &str) -> Result<Partition, ApiError> {
@@ -525,26 +616,7 @@ pub fn mount_device_with(
     if part.uuid.is_empty() {
         return Err(ApiError::BadRequest("device has no UUID; cannot persist a mount".into()));
     }
-    let fallback = if part.label.is_empty() {
-        safe_label(&part.uuid)
-    } else {
-        safe_label(&part.label)
-    };
-    let folder = match opts.folder.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(raw) => safe_label(raw),
-        None => cfg
-            .storage_mounts
-            .iter()
-            .find(|m| m.uuid == part.uuid)
-            .and_then(|m| {
-                m.mountpoint
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-            })
-            .filter(|s| !s.is_empty())
-            .unwrap_or(fallback),
-    };
-    let dest = PathBuf::from(MEDIA_ROOT).join(&folder);
+    let dest = resolve_mount_dest(cfg, part, opts)?;
     if is_path_mounted(&dest) {
         return Err(ApiError::BadRequest(format!(
             "{} is already in use as a mount point",
@@ -556,13 +628,18 @@ pub fn mount_device_with(
     let opts_str = mount_opts(&part.fstype, opts.read_only);
     let src = format!("UUID={}", part.uuid);
     util::run_ok("mount", &["-o", &opts_str, &src, &dest.display().to_string()])?;
+    let folder_name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "disk".into());
     let files_label = opts
         .files_label
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(if part.label.is_empty() {
-            folder.as_str()
+            folder_name.as_str()
         } else {
             part.label.as_str()
         })
@@ -1021,6 +1098,25 @@ mod tests {
         assert!(is_system_mount("/home", data));
         assert!(!is_system_mount("/media/coduos/data", data));
         assert!(!is_system_mount("/mnt/disk", data));
+        assert!(!is_system_mount("/DATA", data));
+    }
+
+    #[test]
+    fn custom_mountpoint_accepts_data_and_rejects_system() {
+        let dest = parse_custom_mountpoint("/DATA/").unwrap();
+        assert_eq!(dest, PathBuf::from("/DATA"));
+        assert_eq!(
+            parse_custom_mountpoint("//DATA//photos").unwrap(),
+            PathBuf::from("/DATA/photos")
+        );
+        assert!(parse_custom_mountpoint("DATA").is_err());
+        assert!(parse_custom_mountpoint("/").is_err());
+        assert!(parse_custom_mountpoint("/tmp/../DATA").is_err());
+        let data = Path::new("/var/lib/coduos");
+        assert!(validate_custom_mountpoint("/DATA", data).is_ok());
+        assert!(validate_custom_mountpoint("/home", data).is_err());
+        assert!(validate_custom_mountpoint("/media/coduos", data).is_err());
+        assert!(validate_custom_mountpoint("/mnt", data).is_err());
     }
 
     #[test]
