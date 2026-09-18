@@ -164,7 +164,7 @@
 </ol>
 
 <h3 class="group-title">Clients</h3>
-<form class="row" onsubmit={addPeer} style="margin-bottom:12px">
+<form class="row" onsubmit={addPeer} style="margin-bottom:8px">
   <input bind:value={name} placeholder="Phone" required disabled={!status?.privileged} />
   <select bind:value={tunnel} disabled={!status?.privileged}>
     <option value="lan">LAN only</option>
@@ -172,6 +172,7 @@
   </select>
   <button class="btn" disabled={!status?.privileged}>Add</button>
 </form>
+<p class="hint">LAN only: only the home network goes through the VPN (this NAS at 10.8.0.1 and LAN addresses such as 192.168.1.x). The phone’s usual internet stays on cellular or Wi‑Fi. Full tunnel: all internet traffic from the device exits through the house. After connecting, open those addresses — not the public VPN hostname. Re-scan QR or download the config again if the phone was added before a routing change.</p>
 
 {#each status?.peers ?? [] as p}
   <div class="mini-card">

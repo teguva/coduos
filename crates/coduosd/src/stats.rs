@@ -660,7 +660,7 @@ fn disk_key(name: &str) -> String {
         .to_string()
 }
 
-fn is_virtual(name: &str) -> bool {
+pub(crate) fn is_virtual(name: &str) -> bool {
     Path::new("/sys/devices/virtual/net").join(name).is_dir() || is_virtual_name(name)
 }
 

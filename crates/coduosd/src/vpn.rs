@@ -169,12 +169,133 @@ fn ensure_server_keys(state: &mut VpnState) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn allowed_ips(tunnel: &str) -> &'static str {
+fn allowed_ips(tunnel: &str) -> String {
     if tunnel == "full" {
-        "0.0.0.0/0, ::/0"
+        "0.0.0.0/0, ::/0".into()
     } else {
-        "10.8.0.0/24"
+        lan_allowed_ips()
     }
+}
+
+fn lan_allowed_ips() -> String {
+    let mut nets = vec!["10.8.0.0/24".to_string()];
+    for cidr in lan_cidrs() {
+        if !nets.iter().any(|n| n == &cidr) {
+            nets.push(cidr);
+        }
+    }
+    nets.join(", ")
+}
+
+fn ipv4_cidr(addr: &str, prefix: u8) -> Option<String> {
+    if prefix > 32 {
+        return None;
+    }
+    let ip: std::net::Ipv4Addr = addr.parse().ok()?;
+    if ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_multicast() {
+        return None;
+    }
+    let mask = if prefix == 0 {
+        0
+    } else {
+        !0u32 << (32 - prefix)
+    };
+    let net = std::net::Ipv4Addr::from(u32::from(ip) & mask);
+    Some(format!("{net}/{prefix}"))
+}
+
+fn lan_cidrs() -> Vec<String> {
+    let mut nets = lan_cidrs_from_ip_json();
+    if nets.is_empty() {
+        nets = lan_cidrs_from_ip_text();
+    }
+    nets.sort();
+    nets.dedup();
+    nets
+}
+
+fn lan_cidrs_from_ip_json() -> Vec<String> {
+    let Ok(out) = std::process::Command::new("ip")
+        .args(["-j", "-4", "addr"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return Vec::new();
+    };
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
+    let mut nets = Vec::new();
+    for iface in arr {
+        let Some(name) = iface.get("ifname").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        if name == "lo" || crate::stats::is_virtual(name) {
+            continue;
+        }
+        let Some(infos) = iface.get("addr_info").and_then(|x| x.as_array()) else {
+            continue;
+        };
+        for info in infos {
+            if info.get("family").and_then(|x| x.as_str()) != Some("inet") {
+                continue;
+            }
+            let Some(local) = info.get("local").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let prefix = info
+                .get("prefixlen")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(24)
+                .min(32) as u8;
+            if let Some(cidr) = ipv4_cidr(local, prefix) {
+                if cidr != "10.8.0.0/24" {
+                    nets.push(cidr);
+                }
+            }
+        }
+    }
+    nets
+}
+
+fn lan_cidrs_from_ip_text() -> Vec<String> {
+    let Ok(out) = std::process::Command::new("ip")
+        .args(["-o", "-4", "addr", "show"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let name = parts.nth(1)?;
+            if name == "lo" || crate::stats::is_virtual(name) {
+                return None;
+            }
+            while let Some(tok) = parts.next() {
+                if tok == "inet" {
+                    let spec = parts.next()?;
+                    let (addr, prefix) = spec.split_once('/')?;
+                    let prefix: u8 = prefix.parse().ok()?;
+                    let cidr = ipv4_cidr(addr, prefix)?;
+                    if cidr == "10.8.0.0/24" {
+                        return None;
+                    }
+                    return Some(cidr);
+                }
+            }
+            None
+        })
+        .collect()
 }
 
 fn write_conf(cfg: &Config, state: &VpnState) -> Result<(), ApiError> {
@@ -183,6 +304,22 @@ fn write_conf(cfg: &Config, state: &VpnState) -> Result<(), ApiError> {
     body.push_str(&format!("PrivateKey = {}\n", state.private_key));
     body.push_str(&format!("Address = {SERVER_ADDR}\n"));
     body.push_str(&format!("ListenPort = {}\n", state.listen_port));
+    body.push_str("PostUp = sysctl -qw net.ipv4.ip_forward=1\n");
+    body.push_str("PostUp = sysctl -qw net.ipv4.conf.%i.rp_filter=2\n");
+    body.push_str("PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT || true\n");
+    body.push_str(
+        "PostUp = iptables -I FORWARD 1 -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT || true\n",
+    );
+    body.push_str(
+        "PostUp = iptables -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j MASQUERADE || true\n",
+    );
+    body.push_str("PostDown = iptables -D FORWARD -i %i -j ACCEPT || true\n");
+    body.push_str(
+        "PostDown = iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT || true\n",
+    );
+    body.push_str(
+        "PostDown = iptables -t nat -D POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j MASQUERADE || true\n",
+    );
     body.push('\n');
     for peer in state.peers.iter().filter(|p| p.enabled) {
         body.push_str("[Peer]\n");
@@ -458,4 +595,21 @@ pub fn conf_file_name(cfg: &Config, id: &str) -> Result<String, ApiError> {
 
 pub fn ensure_dirs(cfg: &Config) {
     let _ = std::fs::create_dir_all(dir(cfg));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lan_cidr_from_address() {
+        assert_eq!(ipv4_cidr("192.168.1.140", 24).as_deref(), Some("192.168.1.0/24"));
+        assert_eq!(ipv4_cidr("10.0.0.5", 8).as_deref(), Some("10.0.0.0/8"));
+        assert_eq!(ipv4_cidr("127.0.0.1", 8), None);
+    }
+
+    #[test]
+    fn full_tunnel_routes_everything() {
+        assert_eq!(allowed_ips("full"), "0.0.0.0/0, ::/0");
+    }
 }
