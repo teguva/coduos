@@ -294,20 +294,25 @@ async fn blocking_action(
     let row = state.db.get_app(id)?.ok_or(ApiError::NotFound)?;
     let cfg = state.config.read().await;
     docker::write_compose(&cfg.apps_dir(), id, &row.compose_yaml)?;
-    let (ok, stdout, stderr) = docker::compose(&cfg.apps_dir(), id, args).await?;
-    drop(cfg);
+    let apps_dir = cfg.apps_dir();
+    let (ok, stdout, stderr) = docker::compose(&apps_dir, id, args).await?;
     if !ok {
-        let err = docker::short_error(if !stderr.trim().is_empty() {
-            &stderr
+        let raw = if !stderr.trim().is_empty() {
+            stderr.clone()
         } else {
-            &stdout
-        });
+            stdout.clone()
+        };
+        docker::write_job_log(&apps_dir, id, &raw);
+        drop(cfg);
+        let err = docker::short_error(&raw);
         let _ = state.db.set_last_error(id, Some(&err));
         return Err(ApiError::BadRequest(err));
     }
     if args != ["stop"] {
+        docker::clear_job_log(&apps_dir, id);
         let _ = state.db.set_last_error(id, None);
     }
+    drop(cfg);
     Ok(Json(load_app(state, id).await?))
 }
 
@@ -390,11 +395,11 @@ async fn run_job(state: AppState, id: String, kind: JobKind) {
         {
             Ok((true, _)) => {}
             Ok((false, log)) => {
-                fail_job(&state, &id, &log);
+                fail_job(&state, &apps_dir, &id, &log);
                 return;
             }
             Err(err) => {
-                fail_job(&state, &id, &err.to_string());
+                fail_job(&state, &apps_dir, &id, &err.to_string());
                 return;
             }
         }
@@ -414,12 +419,13 @@ async fn run_job(state: AppState, id: String, kind: JobKind) {
     .await
     {
         Ok((true, _)) => {
+            docker::clear_job_log(&apps_dir, &id);
             let _ = state.db.set_last_error(&id, None);
             wait_for_app_ready(&state, &id).await;
             state.clear_job(&id);
         }
-        Ok((false, log)) => fail_job(&state, &id, &log),
-        Err(err) => fail_job(&state, &id, &err.to_string()),
+        Ok((false, log)) => fail_job(&state, &apps_dir, &id, &log),
+        Err(err) => fail_job(&state, &apps_dir, &id, &err.to_string()),
     }
 }
 
@@ -442,9 +448,10 @@ async fn wait_for_app_ready(state: &AppState, id: &str) {
     let _ = docker::wait_for_tcp(port, Duration::from_secs(90)).await;
 }
 
-fn fail_job(state: &AppState, id: &str, raw: &str) {
+fn fail_job(state: &AppState, apps_dir: &std::path::Path, id: &str, raw: &str) {
     let err = docker::short_error(raw);
     tracing::warn!(app = %id, error = %err, "app job failed");
+    docker::write_job_log(apps_dir, id, raw);
     let _ = state.db.set_last_error(id, Some(&err));
     state.clear_job(id);
 }
@@ -461,17 +468,20 @@ async fn logs(
     axum::extract::Query(q): axum::extract::Query<LogQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     current_user(&state, &jar).await?;
-    let _ = state.db.get_app(&id)?.ok_or(ApiError::NotFound)?;
+    let row = state.db.get_app(&id)?.ok_or(ApiError::NotFound)?;
     let tail = q.tail.unwrap_or(200).clamp(1, 2000).to_string();
     let cfg = state.config.read().await;
-    let (ok, stdout, stderr) = docker::compose(
+    let job = docker::read_job_log(&cfg.apps_dir(), &id);
+    let (stdout, stderr) = match docker::compose(
         &cfg.apps_dir(),
         &id,
         &["logs", "--no-color", "--tail", &tail],
     )
-    .await?;
-    if !ok && stdout.is_empty() {
-        return Err(ApiError::BadRequest(docker::short_error(&stderr)));
-    }
-    Ok(Json(serde_json::json!({ "logs": stdout, "stderr": stderr })))
+    .await
+    {
+        Ok((_, stdout, stderr)) => (stdout, stderr),
+        Err(err) => (String::new(), err.to_string()),
+    };
+    let logs = docker::merge_app_logs(&job, &stdout, &stderr, row.last_error.as_deref());
+    Ok(Json(serde_json::json!({ "logs": logs })))
 }

@@ -246,6 +246,72 @@ pub fn write_compose(apps_dir: &Path, id: &str, yaml: &str) -> Result<PathBuf, A
     Ok(path)
 }
 
+const JOB_LOG: &str = ".coduos-job.log";
+const JOB_LOG_MAX: usize = 64 * 1024;
+
+pub fn job_log_path(apps_dir: &Path, id: &str) -> PathBuf {
+    apps_dir.join(id).join(JOB_LOG)
+}
+
+pub fn write_job_log(apps_dir: &Path, id: &str, raw: &str) {
+    let dir = apps_dir.join(id);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(job_log_path(apps_dir, id), tail_chars(raw, JOB_LOG_MAX));
+}
+
+pub fn clear_job_log(apps_dir: &Path, id: &str) {
+    let _ = std::fs::remove_file(job_log_path(apps_dir, id));
+}
+
+pub fn read_job_log(apps_dir: &Path, id: &str) -> String {
+    std::fs::read_to_string(job_log_path(apps_dir, id)).unwrap_or_default()
+}
+
+pub fn merge_app_logs(job: &str, stdout: &str, stderr: &str, last_error: Option<&str>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let job = job.trim();
+    let stdout = stdout.trim();
+    let stderr = stderr.trim();
+    if !job.is_empty() {
+        parts.push(job.to_string());
+    }
+    if !stdout.is_empty() {
+        if !parts.is_empty() {
+            parts.push("--- container logs ---".into());
+        }
+        parts.push(stdout.to_string());
+    } else if job.is_empty() && !stderr.is_empty() {
+        parts.push(stderr.to_string());
+    }
+    if parts.is_empty() {
+        if let Some(err) = last_error.map(str::trim).filter(|s| !s.is_empty()) {
+            return err.to_string();
+        }
+        return "No logs yet.".into();
+    }
+    parts.join("\n\n")
+}
+
+fn tail_chars(raw: &str, max: usize) -> String {
+    if raw.len() <= max {
+        return raw.to_string();
+    }
+    let mut n = 0;
+    let mut start = raw.len();
+    for (i, ch) in raw.char_indices().rev() {
+        n += ch.len_utf8();
+        start = i;
+        if n >= max {
+            break;
+        }
+    }
+    if start == 0 {
+        raw.to_string()
+    } else {
+        format!("…\n{}", &raw[start..])
+    }
+}
+
 fn write_dotenv(dir: &Path, yaml: &str) -> Result<(), ApiError> {
     let mut env = BTreeMap::new();
     collect_interpolations(yaml, &mut env);
@@ -807,6 +873,34 @@ mod tests {
     #[test]
     fn short_error_uses_last_line() {
         assert_eq!(short_error("warn\nError: no such image"), "no such image");
+    }
+
+    #[test]
+    fn merge_app_logs_prefers_job_output() {
+        let out = super::merge_app_logs(
+            "pull failed: missing env",
+            "",
+            "no containers to show",
+            Some("missing env"),
+        );
+        assert!(out.contains("pull failed"));
+        assert!(!out.contains("no containers"));
+    }
+
+    #[test]
+    fn merge_app_logs_falls_back_to_last_error() {
+        assert_eq!(
+            super::merge_app_logs("", "", "", Some("disk full")),
+            "disk full"
+        );
+        assert_eq!(super::merge_app_logs("", "", "", None), "No logs yet.");
+    }
+
+    #[test]
+    fn tail_chars_keeps_end() {
+        let s = super::tail_chars("abcdefghij", 4);
+        assert!(s.ends_with("ghij"));
+        assert!(s.starts_with('…'));
     }
 
     #[tokio::test]

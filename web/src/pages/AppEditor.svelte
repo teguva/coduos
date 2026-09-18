@@ -325,6 +325,7 @@
       loadApp(jobs)
         .then(() => {
           pane = stack.services.length > 1 ? 'services' : 'app';
+          return loadLogs();
         })
         .catch((e: Error) => (error = e.message));
     }
@@ -333,7 +334,9 @@
       jobs = next;
       if (!id) return;
       if (prev && !next[id]) {
-        refreshStatus(jobs).catch(() => {});
+        refreshStatus(jobs)
+          .then(() => loadLogs())
+          .catch(() => {});
         return;
       }
       if (next[id]) status = overlayJob(status, next[id]);
@@ -408,8 +411,12 @@
 
   async function loadLogs() {
     if (!id) return;
-    const res = await api<{ logs: string }>(`/api/apps/${id}/logs`);
-    logs = res.logs;
+    try {
+      const res = await api<{ logs: string }>(`/api/apps/${id}/logs`);
+      logs = (res.logs || '').trim() ? res.logs : '(empty)';
+    } catch (err: any) {
+      logs = err.message || 'Could not load logs.';
+    }
   }
 
   async function remove() {
@@ -608,7 +615,7 @@
     <h2>Logs</h2>
     <button class="btn secondary compact" onclick={loadLogs}>Refresh logs</button>
   </div>
-  <pre class="logs">{logs || 'Click refresh to load logs.'}</pre>
+  <pre class="logs">{logs || 'Loading logs…'}</pre>
 {/if}
 </AppWindow>
 
