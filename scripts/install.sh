@@ -430,10 +430,10 @@ unset local_data data_choice
 echo "Installing packages…"
 base_pkgs=()
 case "${PM}" in
-  apt) base_pkgs+=(curl tar ca-certificates parted e2fsprogs) ;;
-  pacman) base_pkgs+=(curl tar ca-certificates parted e2fsprogs) ;;
-  dnf) base_pkgs+=(curl tar ca-certificates parted e2fsprogs) ;;
-  apk) base_pkgs+=(curl tar ca-certificates parted e2fsprogs) ;;
+  apt) base_pkgs+=(curl tar ca-certificates parted e2fsprogs openssl) ;;
+  pacman) base_pkgs+=(curl tar ca-certificates parted e2fsprogs openssl) ;;
+  dnf) base_pkgs+=(curl tar ca-certificates parted e2fsprogs openssl) ;;
+  apk) base_pkgs+=(curl tar ca-certificates parted e2fsprogs openssl) ;;
 esac
 if [[ ${#base_pkgs[@]} -gt 0 ]]; then
   pkg_install "${base_pkgs[@]}" || true
@@ -447,6 +447,9 @@ if ! command -v parted >/dev/null 2>&1; then
 fi
 if ! command -v mkfs.ext4 >/dev/null 2>&1; then
   echo "warning: mkfs.ext4 is not installed; formatting needs e2fsprogs" >&2
+fi
+if ! command -v openssl >/dev/null 2>&1; then
+  echo "warning: openssl is not installed; HTTPS and LAN CA need the openssl package" >&2
 fi
 
 if [[ "${WITH_DOCKER}" -eq 1 ]]; then

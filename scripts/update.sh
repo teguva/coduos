@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Update an existing CoduOS install from the latest GitHub Release.
 # Replaces the daemon, web UI, and unit files. Keeps config and data.
-# Installs parted and e2fsprogs if missing (needed to format a whole disk).
+# Compares packaging/deps against installed packages and offers to install missing ones.
 # Does not install or change Docker, nginx, or WireGuard.
 #
 #   curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/update.sh | sudo bash
+#   CODUOS_PACKAGES=no sudo -E bash scripts/update.sh   # skip missing packages
 set -euo pipefail
 
 REPO="${CODUOS_REPO:-teguva/coduos}"
@@ -71,18 +72,49 @@ pkg_install() {
   esac
 }
 
+ask_yes() {
+  local prompt="$1"
+  local default="${2:-y}"
+  local preset="${3:-}"
+  local reply=""
+
+  if [[ -n "${preset}" ]]; then
+    case "${preset,,}" in
+      y|yes|1|true|on) return 0 ;;
+      n|no|0|false|off) return 1 ;;
+    esac
+  fi
+
+  if [[ ! -r /dev/tty ]]; then
+    if [[ "${default}" == y ]]; then
+      echo "${prompt} -> yes (no TTY; override with CODUOS_PACKAGES=no)"
+      return 0
+    fi
+    echo "${prompt} -> no (no TTY)"
+    return 1
+  fi
+
+  if [[ "${default}" == y ]]; then
+    read -r -p "${prompt} [Y/n] " reply </dev/tty || true
+    reply="${reply:-y}"
+  else
+    read -r -p "${prompt} [y/N] " reply </dev/tty || true
+    reply="${reply:-n}"
+  fi
+  [[ "${reply}" =~ ^[Yy] ]]
+}
+
+fallback_deps() {
+  cat <<'EOF'
+parted|parted|Format a whole disk
+e2fsprogs|mkfs.ext4|Format ext4 volumes
+openssl|openssl|HTTPS certificates and LAN CA
+EOF
+}
+
 if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
   echo "curl and tar are required" >&2
   exit 1
-fi
-
-echo "Ensuring disk tools…"
-pkg_install parted e2fsprogs || true
-if ! command -v parted >/dev/null 2>&1; then
-  echo "warning: parted is not installed; whole-disk format needs the parted package" >&2
-fi
-if ! command -v mkfs.ext4 >/dev/null 2>&1; then
-  echo "warning: mkfs.ext4 is not installed; formatting needs e2fsprogs" >&2
 fi
 
 before=""
@@ -128,10 +160,45 @@ if [[ ! -x "${root}/usr/bin/coduosd" ]]; then
   exit 1
 fi
 
+deps_text=""
+if [[ -f "${root}/usr/share/coduos/deps" ]]; then
+  deps_text=$(cat "${root}/usr/share/coduos/deps")
+else
+  deps_text=$(fallback_deps)
+fi
+missing_pkgs=()
+echo
+echo "Checking packages…"
+while IFS='|' read -r pkg cmd reason; do
+  pkg="${pkg#"${pkg%%[![:space:]]*}"}"
+  [[ -z "${pkg}" || "${pkg}" == \#* ]] && continue
+  cmd="${cmd#"${cmd%%[![:space:]]*}"}"
+  reason="${reason#"${reason%%[![:space:]]*}"}"
+  if command -v "${cmd}" >/dev/null 2>&1; then
+    echo "  ${pkg}: installed"
+  else
+    echo "  ${pkg}: missing — ${reason}"
+    missing_pkgs+=("${pkg}")
+  fi
+done <<< "${deps_text}"
+if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
+  echo "Missing: ${missing_pkgs[*]}"
+  if ask_yes "Install missing packages?" y "${CODUOS_PACKAGES:-}"; then
+    pkg_install "${missing_pkgs[@]}" || true
+  else
+    echo "Skipping package install."
+  fi
+else
+  echo "All listed packages are installed."
+fi
+
 install -d /usr/bin /usr/share/coduos /usr/lib/systemd/system
 install -m 0755 "${root}/usr/bin/coduosd" /usr/bin/coduosd
 rm -rf /usr/share/coduos/www
 cp -a "${root}/usr/share/coduos/www" /usr/share/coduos/www
+if [[ -f "${root}/usr/share/coduos/deps" ]]; then
+  install -m 0644 "${root}/usr/share/coduos/deps" /usr/share/coduos/deps
+fi
 install -m 0644 "${root}/usr/lib/systemd/system/coduosd.service" /usr/lib/systemd/system/coduosd.service
 if [[ -f "${root}/usr/lib/systemd/system/coduos-wg.service" ]]; then
   install -m 0644 "${root}/usr/lib/systemd/system/coduos-wg.service" /usr/lib/systemd/system/coduos-wg.service

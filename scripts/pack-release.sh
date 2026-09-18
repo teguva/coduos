@@ -26,6 +26,7 @@ install -m 0644 "${root}/packaging/coduosd.service" "${stage}/usr/lib/systemd/sy
 install -m 0644 "${root}/packaging/coduos-wg.service" "${stage}/usr/lib/systemd/system/coduos-wg.service"
 install -m 0644 "${root}/packaging/coduos.toml" "${stage}/etc/coduos/coduos.toml"
 install -m 0644 "${root}/packaging/nginx-coduos.conf" "${stage}/usr/share/coduos/nginx-coduos.conf"
+install -m 0644 "${root}/packaging/deps" "${stage}/usr/share/coduos/deps"
 
 mkdir -p "${root}/dist"
 tarball="${root}/dist/linux-${TARGET_ARCH}-coduos-v${version}.tar.gz"

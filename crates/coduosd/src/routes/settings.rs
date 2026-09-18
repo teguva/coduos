@@ -1,5 +1,5 @@
 use axum::extract::State;
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use crate::auth;
 use crate::config::{valid_id, FileFavorite, FileRoot, UnitSpec};
 use crate::error::ApiError;
 use crate::github;
+use crate::packages;
 use crate::state::AppState;
 
 use super::current_user;
@@ -17,6 +18,7 @@ pub fn router() -> Router<AppState> {
         .route("/settings", get(get_settings).put(put_settings))
         .route("/settings/password", put(password))
         .route("/update", get(update).post(apply_update))
+        .route("/update/packages", post(install_packages))
 }
 
 #[derive(Serialize)]
@@ -157,17 +159,26 @@ async fn update(
     Ok(Json(info))
 }
 
+#[derive(Deserialize, Default)]
+struct ApplyIn {
+    #[serde(default)]
+    install_packages: bool,
+}
+
 async fn apply_update(
     State(state): State<AppState>,
     jar: CookieJar,
+    body: Option<Json<ApplyIn>>,
 ) -> Result<Json<github::ApplyResult>, ApiError> {
     current_user(&state, &jar).await?;
     let cfg = state.config.read().await;
+    let install_packages = body.map(|b| b.0.install_packages).unwrap_or(false);
     let result = github::apply(
         &state.http,
         &cfg.github_owner,
         &cfg.github_repo,
         &cfg.www_dir,
+        install_packages,
     )
     .await?;
     drop(cfg);
@@ -179,4 +190,20 @@ async fn apply_update(
             .await;
     });
     Ok(Json(result))
+}
+
+async fn install_packages(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<packages::InstallOut>, ApiError> {
+    current_user(&state, &jar).await?;
+    if !github::running_installed_bin() {
+        return Err(ApiError::BadRequest(
+            "only the installed daemon at /usr/bin/coduosd can install packages".into(),
+        ));
+    }
+    tokio::task::spawn_blocking(packages::install_missing)
+        .await
+        .map_err(ApiError::internal)?
+        .map(Json)
 }

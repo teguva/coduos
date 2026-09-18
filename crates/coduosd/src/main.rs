@@ -8,6 +8,7 @@ mod docker;
 mod error;
 mod github;
 mod jail;
+mod packages;
 mod proxy;
 mod routes;
 mod state;

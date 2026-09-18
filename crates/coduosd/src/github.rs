@@ -4,6 +4,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
+use crate::packages::{self, PackageStatus};
 use crate::util;
 
 #[derive(Debug, Serialize)]
@@ -13,6 +14,8 @@ pub struct UpdateInfo {
     pub html_url: Option<String>,
     pub up_to_date: bool,
     pub can_apply: bool,
+    pub can_install_packages: bool,
+    pub packages: Vec<PackageStatus>,
     pub error: Option<String>,
 }
 
@@ -21,6 +24,8 @@ pub struct ApplyResult {
     pub ok: bool,
     pub version: String,
     pub restarting: bool,
+    pub packages_installed: Vec<String>,
+    pub packages_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,12 +74,20 @@ fn up_to_date(current: &str, tag: &str) -> bool {
     latest == current || tag == format!("v{current}")
 }
 
+fn packages_info() -> (bool, Vec<PackageStatus>) {
+    (
+        util::privileged() && running_installed_bin(),
+        packages::status(),
+    )
+}
+
 pub async fn check(
     client: &reqwest::Client,
     owner: &str,
     repo: &str,
 ) -> Result<UpdateInfo, ApiError> {
     let current = current_version();
+    let (can_install_packages, pkgs) = packages_info();
     let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
     let res = client
         .get(&url)
@@ -92,6 +105,8 @@ pub async fn check(
                     && running_installed_bin()
                     && !current_is_latest
                     && !latest.is_empty(),
+                can_install_packages,
+                packages: pkgs,
                 up_to_date: current_is_latest,
                 latest: Some(latest),
                 html_url: Some(body.html_url),
@@ -105,6 +120,8 @@ pub async fn check(
             html_url: None,
             up_to_date: true,
             can_apply: false,
+            can_install_packages,
+            packages: pkgs,
             error: Some(format!("GitHub HTTP {}", resp.status())),
         }),
         Err(err) => Ok(UpdateInfo {
@@ -113,6 +130,8 @@ pub async fn check(
             html_url: None,
             up_to_date: true,
             can_apply: false,
+            can_install_packages,
+            packages: pkgs,
             error: Some(err.to_string()),
         }),
     }
@@ -246,6 +265,7 @@ pub async fn apply(
     owner: &str,
     repo: &str,
     www_dir: &Path,
+    install_packages: bool,
 ) -> Result<ApplyResult, ApiError> {
     util::require_privileged()?;
     if !running_installed_bin() {
@@ -324,15 +344,30 @@ pub async fn apply(
             )?;
         }
         let _ = util::run("systemctl", &["daemon-reload"]);
-        util::ensure_disk_format_tools();
         Ok::<(), ApiError>(())
     }
     .await;
     let _ = std::fs::remove_dir_all(&tmp);
     install?;
+    let mut packages_installed = Vec::new();
+    let mut packages_error = None;
+    if install_packages {
+        match tokio::task::spawn_blocking(packages::install_missing)
+            .await
+            .map_err(ApiError::internal)?
+        {
+            Ok(out) => {
+                packages_installed = out.installed;
+                packages_error = out.error;
+            }
+            Err(err) => packages_error = Some(err.to_string()),
+        }
+    }
     Ok(ApplyResult {
         ok: true,
         version,
         restarting: true,
+        packages_installed,
+        packages_error,
     })
 }

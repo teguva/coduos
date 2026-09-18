@@ -1,0 +1,5 @@
+# CoduOS feature packages. Keep in sync with crates/coduosd/src/packages.rs
+# package|command|reason
+parted|parted|Format a whole disk
+e2fsprogs|mkfs.ext4|Format ext4 volumes
+openssl|openssl|HTTPS certificates and LAN CA

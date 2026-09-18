@@ -40,12 +40,15 @@
     hostname: string;
     privileged: boolean;
   };
+  type Pkg = { name: string; command: string; reason: string; installed: boolean };
   type Update = {
     current: string;
     latest?: string | null;
     html_url?: string | null;
     up_to_date: boolean;
     can_apply?: boolean;
+    can_install_packages?: boolean;
+    packages?: Pkg[];
     error?: string | null;
   };
   type BatteryLimit = {
@@ -114,12 +117,30 @@
   let addingRoot = $state(false);
   let applying = $state(false);
   let confirmUpdate = $state(false);
+  let installPkgs = $state(true);
+  let pkgBusy = $state(false);
   let display = $state<DisplayOut | null>(null);
   let displayBusy = $state(false);
   let powerConfirm = $state<'reboot' | 'shutdown' | null>(null);
   let powerBusy = $state('');
 
   let active = $derived(nav.some((n) => n.id === pane) ? pane : 'general');
+  const missingPkgs = $derived((update?.packages || []).filter((p) => !p.installed));
+
+  function pkgList(pkgs: Pkg[]) {
+    return pkgs.map((p) => `${p.name} (${p.reason})`).join(', ');
+  }
+
+  function updateConfirmBody() {
+    const ver = update?.latest || '';
+    let body = `CoduOS ${ver} will be downloaded and installed. The dashboard restarts; you stay signed in.`;
+    if (missingPkgs.length && installPkgs) {
+      body += ` Also installs: ${pkgList(missingPkgs)}.`;
+    } else if (missingPkgs.length) {
+      body += ` Missing packages will not be installed: ${missingPkgs.map((p) => p.name).join(', ')}.`;
+    }
+    return body;
+  }
 
   function href(id: string) {
     return id === 'general' ? '/settings' : `/settings/${id}`;
@@ -279,14 +300,53 @@
     applying = true;
     confirmUpdate = false;
     try {
-      const res = await api<{ ok: boolean; version: string; restarting: boolean }>('/api/update', {
-        method: 'POST'
+      const res = await api<{
+        ok: boolean;
+        version: string;
+        restarting: boolean;
+        packages_installed?: string[];
+        packages_error?: string | null;
+      }>('/api/update', {
+        method: 'POST',
+        body: JSON.stringify({ install_packages: installPkgs && missingPkgs.length > 0 })
       });
-      notice = `Installed ${res.version}. Restarting…`;
+      const extra = res.packages_installed?.length
+        ? ` Installed ${res.packages_installed.join(', ')}.`
+        : '';
+      if (res.packages_error) {
+        error = res.packages_error;
+      }
+      notice = `Installed ${res.version}.${extra} Restarting…`;
       await waitForRestart();
     } catch (err: any) {
       error = err.message;
       applying = false;
+    }
+  }
+
+  async function installMissingPackages() {
+    error = '';
+    notice = '';
+    pkgBusy = true;
+    try {
+      const res = await api<{
+        ok: boolean;
+        installed: string[];
+        packages: Pkg[];
+        error?: string | null;
+      }>('/api/update/packages', { method: 'POST' });
+      if (update) update = { ...update, packages: res.packages };
+      if (res.error) {
+        error = res.error;
+      } else if (res.installed.length) {
+        notice = `Installed ${res.installed.join(', ')}.`;
+      } else {
+        notice = 'All listed packages are already installed.';
+      }
+    } catch (err: any) {
+      error = err.message;
+    } finally {
+      pkgBusy = false;
     }
   }
 
@@ -484,6 +544,25 @@
           {:else if update.html_url}
             <a class="btn secondary" href={update.html_url} target="_blank" rel="noreferrer">Open GitHub release</a>
           {/if}
+          {#if missingPkgs.length}
+            <p class="hint">Missing packages: {pkgList(missingPkgs)}</p>
+            {#if update.can_install_packages}
+              {#if !update.up_to_date && !update.error}
+                <label class="toggle-row">
+                  <span>Install missing packages with this update</span>
+                  <input type="checkbox" bind:checked={installPkgs} disabled={applying || pkgBusy} />
+                </label>
+              {:else}
+                <button class="btn secondary" disabled={pkgBusy} onclick={installMissingPackages}>
+                  {pkgBusy ? 'Installing…' : 'Install missing packages'}
+                </button>
+              {/if}
+            {:else if !settings?.privileged}
+              <p class="hint">Installing packages needs the installed daemon running as root.</p>
+            {/if}
+          {:else if update.packages?.length}
+            <p class="hint">Packages: {update.packages.map((p) => p.name).join(', ')} — all installed.</p>
+          {/if}
           <p class="hint">github.com/{settings?.github_owner}/{settings?.github_repo}</p>
         {/if}
       </section>
@@ -546,7 +625,7 @@
 {#if confirmUpdate && update?.latest}
   <Confirm
     title="Install update?"
-    body={`CoduOS ${update.latest} will be downloaded and installed. The dashboard restarts; you stay signed in.`}
+    body={updateConfirmBody()}
     confirmLabel={`Update to ${update.latest}`}
     onCancel={() => (confirmUpdate = false)}
     onConfirm={applyUpdate}
