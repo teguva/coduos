@@ -123,6 +123,11 @@ impl Default for SystemSummary {
     }
 }
 
+const TICK: Duration = Duration::from_millis(1000);
+const DOCKER_TTL: Duration = Duration::from_secs(15);
+const DISK_TTL: Duration = Duration::from_secs(5);
+const ADDR_TTL: Duration = Duration::from_secs(5);
+
 struct Collector {
     sys: System,
     nets: Networks,
@@ -134,6 +139,12 @@ struct Collector {
     prev_gpu_engine_at: Option<Instant>,
     prev_gpu_rapl_uj: Option<u64>,
     prev_gpu_rapl_at: Option<Instant>,
+    docker: DockerInfo,
+    docker_at: Option<Instant>,
+    disk_infos: Vec<DiskInfo>,
+    disks_at: Option<Instant>,
+    addrs: HashMap<String, String>,
+    addrs_at: Option<Instant>,
 }
 
 pub fn spawn_collector(tx: tokio::sync::watch::Sender<SystemSummary>) {
@@ -149,19 +160,38 @@ pub fn spawn_collector(tx: tokio::sync::watch::Sender<SystemSummary>) {
             prev_gpu_engine_at: None,
             prev_gpu_rapl_uj: None,
             prev_gpu_rapl_at: None,
+            docker: DockerInfo {
+                available: false,
+                version: None,
+                error: None,
+            },
+            docker_at: None,
+            disk_infos: vec![],
+            disks_at: None,
+            addrs: HashMap::new(),
+            addrs_at: None,
         };
+        // Prime CPU counters so the first widget paint is not 0%.
+        col.sys.refresh_cpu_all();
+        col.sys.refresh_memory();
+        std::thread::sleep(Duration::from_millis(200));
         loop {
+            let start = Instant::now();
             let summary = col.collect();
             if tx.send(summary).is_err() {
                 break;
             }
-            std::thread::sleep(Duration::from_secs(2));
+            let wait = TICK.saturating_sub(start.elapsed());
+            if !wait.is_zero() {
+                std::thread::sleep(wait);
+            }
         }
     });
 }
 
 impl Collector {
     fn collect(&mut self) -> SystemSummary {
+        // CPU% is the delta since the previous tick (~1s), not an extra inner sleep.
         self.sys.refresh_memory();
         self.sys.refresh_cpu_all();
         let kind = ProcessRefreshKind::nothing()
@@ -171,18 +201,12 @@ impl Collector {
             .with_exe(UpdateKind::OnlyIfNotSet);
         self.sys
             .refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
-        std::thread::sleep(Duration::from_millis(200));
-        self.sys.refresh_cpu_all();
-        self.sys.refresh_memory();
-        self.sys
-            .refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
 
-        let disks = Disks::new_with_refreshed_list();
         self.nets.refresh(true);
 
         let now = Instant::now();
         let dt = now.duration_since(self.prev_at).as_secs_f64().max(0.2);
-        let addrs = ipv4_map();
+        let addrs = self.ipv4_map_cached(now);
 
         let mut net_infos = Vec::new();
         for (name, data) in self.nets.iter() {
@@ -219,7 +243,7 @@ impl Collector {
         }
         self.prev_at = now;
 
-        let disk_infos = collect_disk_infos(&disks);
+        let disk_infos = self.disks_cached(now);
 
         let mut components = Components::new_with_refreshed_list();
         components.refresh(true);
@@ -284,7 +308,7 @@ impl Collector {
             sensors,
             gpus,
             processes,
-            docker: docker_info(),
+            docker: self.docker_cached(now),
             batteries: crate::battery::summary_batteries(),
             version: env!("CARGO_PKG_VERSION").into(),
             privileged: crate::config::running_as_root(),
@@ -332,8 +356,39 @@ impl Collector {
         watts.filter(|w| w.is_finite() && *w >= 0.0 && *w < 200.0)
     }
 
+    fn ipv4_map_cached(&mut self, now: Instant) -> HashMap<String, String> {
+        if self.addrs_at.is_some_and(|at| now.duration_since(at) < ADDR_TTL) {
+            return self.addrs.clone();
+        }
+        self.addrs = ipv4_map();
+        self.addrs_at = Some(now);
+        self.addrs.clone()
+    }
+
+    fn disks_cached(&mut self, now: Instant) -> Vec<DiskInfo> {
+        if self.disks_at.is_some_and(|at| now.duration_since(at) < DISK_TTL) {
+            return self.disk_infos.clone();
+        }
+        let disks = Disks::new_with_refreshed_list();
+        self.disk_infos = collect_disk_infos(&disks);
+        self.disks_at = Some(now);
+        self.disk_infos.clone()
+    }
+
+    fn docker_cached(&mut self, now: Instant) -> DockerInfo {
+        if self.docker_at.is_some_and(|at| now.duration_since(at) < DOCKER_TTL) {
+            return self.docker.clone();
+        }
+        self.docker = docker_info();
+        self.docker_at = Some(now);
+        self.docker.clone()
+    }
+
     fn collect_gpus(&mut self, sensors: &[SensorInfo]) -> Vec<GpuInfo> {
-        let mut gpus = nvidia_gpus();
+        let mut gpus = Vec::new();
+        if nvidia_present() {
+            gpus.extend(nvidia_gpus());
+        }
         gpus.extend(self.sysfs_gpus(sensors));
         gpus
     }
@@ -732,6 +787,13 @@ fn pick_cpu_temp(sensors: &[SensorInfo]) -> Option<f32> {
     sensors.first().map(|s| s.temp_c)
 }
 
+fn nvidia_present() -> bool {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PRESENT.get_or_init(|| {
+        std::path::Path::new("/usr/bin/nvidia-smi").exists() || crate::util::which("nvidia-smi")
+    })
+}
+
 fn nvidia_gpus() -> Vec<GpuInfo> {
     let out = std::process::Command::new("nvidia-smi")
         .args([
@@ -985,6 +1047,21 @@ fn hwmon_cpu_power_w() -> Option<f32> {
 }
 
 fn docker_info() -> DockerInfo {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let _ = std::thread::Builder::new()
+        .name("coduos-docker-info".into())
+        .spawn(move || {
+            let _ = tx.send(docker_info_cmd());
+        });
+    rx.recv_timeout(Duration::from_millis(400))
+        .unwrap_or(DockerInfo {
+            available: false,
+            version: None,
+            error: Some("docker version timed out".into()),
+        })
+}
+
+fn docker_info_cmd() -> DockerInfo {
     match std::process::Command::new("docker")
         .args(["version", "--format", "{{.Server.Version}}"])
         .output()

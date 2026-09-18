@@ -18,6 +18,7 @@ mod storage;
 mod systemd;
 mod util;
 mod vpn;
+mod vpn_dns;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -60,6 +61,7 @@ async fn main() -> Result<()> {
     vpn::ensure_dirs(&cfg);
     proxy::ensure_dirs(&cfg);
     ddns::ensure_dirs(&cfg);
+    vpn_dns::spawn(cfg.clone());
     seed_icons_readme(&cfg.icons_dir());
     storage::remount_persisted(&cfg);
     let apps_dir = cfg.apps_dir();

@@ -135,14 +135,14 @@
   }
 
   function recordHist(s: Summary) {
-    cpuHist = [...cpuHist, s.cpu_percent].slice(-90);
-    memHist = [...memHist, pct(s.mem_used, s.mem_total)].slice(-90);
+    cpuHist = [...cpuHist, s.cpu_percent].slice(-180);
+    memHist = [...memHist, pct(s.mem_used, s.mem_total)].slice(-180);
     const nets: Net[] = s.networks ?? [];
     const n =
       nets.find((x) => !x.virtual_iface && x.operstate === 'up') ||
       nets.find((x) => !x.virtual_iface);
     if (n) {
-      netHist = [...netHist, { rx: n.rx_bps, tx: n.tx_bps }].slice(-90);
+      netHist = [...netHist, { rx: n.rx_bps, tx: n.tx_bps }].slice(-180);
     }
   }
 
@@ -184,7 +184,7 @@
           .catch(() => {});
       }
     });
-    const c = setInterval(() => (now = new Date()), 30000);
+    const c = setInterval(() => (now = new Date()), 1000);
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key !== '/' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
       const t = ev.target as HTMLElement | null;

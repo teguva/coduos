@@ -761,6 +761,15 @@ pub fn delete_host(cfg: &Config, id: &str) -> Result<ProxyStatus, ApiError> {
     Ok(status(cfg))
 }
 
+pub fn enabled_hostnames(cfg: &Config) -> Vec<String> {
+    load_state(cfg)
+        .hosts
+        .into_iter()
+        .filter(|h| h.enabled)
+        .map(|h| h.hostname.to_ascii_lowercase())
+        .collect()
+}
+
 pub fn ensure_dirs(cfg: &Config) {
     let _ = std::fs::create_dir_all(conf_d(cfg));
     let _ = std::fs::create_dir_all(dir(cfg).join("acme"));

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 
@@ -12,9 +13,12 @@ use crate::util::{self, privileged, valid_hostname};
 const IFACE: &str = "coduos";
 const SUBNET_PREFIX: &str = "10.8.0.";
 const SERVER_ADDR: &str = "10.8.0.1/24";
-/// In-tunnel resolver. A LAN IP such as 192.168.1.1 cannot be used here: Android
-/// sends DNS into the tunnel before handshake, so the endpoint never resolves.
-const CLIENT_DNS: &str = "10.8.0.1";
+/// In-tunnel resolver. Firefly uses 8.8.8.8 (public, handshake-safe with an IP
+/// endpoint). We answer .home here instead of sending the phone to 192.168.1.1,
+/// which Android tries before handshake and stalls the tunnel.
+pub(crate) const CLIENT_DNS: &str = "10.8.0.1";
+/// Firefly default. Cellular paths often drop a 1420-byte WG packet.
+const CLIENT_MTU: u16 = 1280;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnState {
@@ -302,7 +306,12 @@ fn lan_cidrs_from_ip_text() -> Vec<String> {
         .collect()
 }
 
-fn default_gateway_v4() -> Option<String> {
+struct DefaultRoute {
+    gateway: String,
+    device: String,
+}
+
+fn default_route_v4() -> Option<DefaultRoute> {
     let out = std::process::Command::new("ip")
         .args(["-4", "route", "show", "default"])
         .output()
@@ -312,15 +321,39 @@ fn default_gateway_v4() -> Option<String> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut parts = text.split_whitespace();
+    let mut gateway = None;
+    let mut device = None;
     while let Some(tok) = parts.next() {
         if tok == "via" {
             let ip = parts.next()?;
             if ip.parse::<std::net::Ipv4Addr>().is_ok() {
-                return Some(ip.to_string());
+                gateway = Some(ip.to_string());
             }
+        } else if tok == "dev" {
+            device = parts.next().map(|s| s.to_string());
         }
     }
-    None
+    Some(DefaultRoute {
+        gateway: gateway?,
+        device: device?,
+    })
+}
+
+pub(crate) fn dns_upstream() -> Option<String> {
+    default_route_v4().map(|r| r.gateway)
+}
+
+pub(crate) fn enabled(cfg: &Config) -> bool {
+    load_state(cfg).enabled
+}
+
+fn iptables_bin() -> &'static str {
+    for cand in ["/usr/sbin/iptables", "/sbin/iptables"] {
+        if std::path::Path::new(cand).exists() {
+            return cand;
+        }
+    }
+    "iptables"
 }
 
 fn is_lan_dns(ip: &str) -> bool {
@@ -349,7 +382,7 @@ fn normalize_client_dns(raw: &str) -> Result<String, ApiError> {
     }
     if is_lan_dns(v) {
         return Err(ApiError::BadRequest(
-            "use 10.8.0.1, not the router. Android sends DNS into the tunnel before handshake, so the VPN never comes up. CoduOS forwards 10.8.0.1:53 to the LAN resolver for .home names.".into(),
+            "use 10.8.0.1, not the router. Android sends DNS into the tunnel before handshake, so the VPN never comes up. CoduOS runs DNS on 10.8.0.1 for names like immich.home.".into(),
         ));
     }
     Ok(v.to_string())
@@ -391,41 +424,69 @@ fn client_endpoint(state: &VpnState) -> String {
 }
 
 fn write_conf(cfg: &Config, state: &VpnState) -> Result<(), ApiError> {
+    let ipt = iptables_bin();
+    let lan = default_route_v4().and_then(|r| {
+        let d = r.device;
+        let ok = !d.is_empty()
+            && d.len() <= 16
+            && d.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        ok.then_some(d)
+    });
     let mut body = String::new();
     body.push_str("[Interface]\n");
     body.push_str(&format!("PrivateKey = {}\n", state.private_key));
     body.push_str(&format!("Address = {SERVER_ADDR}\n"));
     body.push_str(&format!("ListenPort = {}\n", state.listen_port));
+    body.push_str(&format!("MTU = {CLIENT_MTU}\n"));
+    // Firefly/wg-easy: forward + MASQUERADE on the LAN/WAN nic (wg_device).
+    // DOCKER-USER is required on Docker hosts; FORWARD policy is often DROP.
     body.push_str("PostUp = sysctl -qw net.ipv4.ip_forward=1\n");
+    body.push_str("PostUp = sysctl -qw net.ipv4.conf.all.src_valid_mark=1\n");
+    body.push_str("PostUp = sysctl -qw net.ipv4.conf.all.rp_filter=2\n");
     body.push_str("PostUp = sysctl -qw net.ipv4.conf.%i.rp_filter=2\n");
-    body.push_str("PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT || true\n");
-    body.push_str(
-        "PostUp = iptables -I FORWARD 1 -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT || true\n",
-    );
-    body.push_str(
-        "PostUp = iptables -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j MASQUERADE || true\n",
-    );
-    if let Some(gw) = default_gateway_v4() {
-        for proto in ["udp", "tcp"] {
-            body.push_str(&format!(
-                "PostUp = iptables -t nat -A PREROUTING -i %i -d 10.8.0.1 -p {proto} --dport 53 -j DNAT --to-destination {gw}:53 || true\n"
-            ));
-        }
+    body.push_str(&format!(
+        "PostUp = {ipt} -C FORWARD -i %i -j ACCEPT 2>/dev/null || {ipt} -I FORWARD 1 -i %i -j ACCEPT || true\n"
+    ));
+    body.push_str(&format!(
+        "PostUp = {ipt} -C FORWARD -o %i -j ACCEPT 2>/dev/null || {ipt} -I FORWARD 1 -o %i -j ACCEPT || true\n"
+    ));
+    body.push_str(&format!(
+        "PostUp = {ipt} -C DOCKER-USER -i %i -j ACCEPT 2>/dev/null || {ipt} -I DOCKER-USER 1 -i %i -j ACCEPT || true\n"
+    ));
+    body.push_str(&format!(
+        "PostUp = {ipt} -C DOCKER-USER -o %i -j ACCEPT 2>/dev/null || {ipt} -I DOCKER-USER 1 -o %i -j ACCEPT || true\n"
+    ));
+    if let Some(dev) = &lan {
+        body.push_str(&format!(
+            "PostUp = {ipt} -t nat -C POSTROUTING -s 10.8.0.0/24 -o {dev} -j MASQUERADE 2>/dev/null || {ipt} -t nat -A POSTROUTING -s 10.8.0.0/24 -o {dev} -j MASQUERADE || true\n"
+        ));
+    } else {
+        body.push_str(&format!(
+            "PostUp = {ipt} -t nat -C POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j MASQUERADE 2>/dev/null || {ipt} -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j MASQUERADE || true\n"
+        ));
     }
-    body.push_str("PostDown = iptables -D FORWARD -i %i -j ACCEPT || true\n");
-    body.push_str(
-        "PostDown = iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT || true\n",
-    );
-    body.push_str(
-        "PostDown = iptables -t nat -D POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j MASQUERADE || true\n",
-    );
-    if let Some(gw) = default_gateway_v4() {
-        for proto in ["udp", "tcp"] {
-            body.push_str(&format!(
-                "PostDown = iptables -t nat -D PREROUTING -i %i -d 10.8.0.1 -p {proto} --dport 53 -j DNAT --to-destination {gw}:53 || true\n"
-            ));
-        }
+    body.push_str(&format!(
+        "PostUp = {ipt} -C INPUT -p udp --dport {} -j ACCEPT 2>/dev/null || {ipt} -A INPUT -p udp --dport {} -j ACCEPT || true\n",
+        state.listen_port, state.listen_port
+    ));
+    body.push_str(&format!("PostDown = {ipt} -D FORWARD -i %i -j ACCEPT || true\n"));
+    body.push_str(&format!("PostDown = {ipt} -D FORWARD -o %i -j ACCEPT || true\n"));
+    body.push_str(&format!("PostDown = {ipt} -D DOCKER-USER -i %i -j ACCEPT || true\n"));
+    body.push_str(&format!("PostDown = {ipt} -D DOCKER-USER -o %i -j ACCEPT || true\n"));
+    if let Some(dev) = &lan {
+        body.push_str(&format!(
+            "PostDown = {ipt} -t nat -D POSTROUTING -s 10.8.0.0/24 -o {dev} -j MASQUERADE || true\n"
+        ));
+    } else {
+        body.push_str(&format!(
+            "PostDown = {ipt} -t nat -D POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j MASQUERADE || true\n"
+        ));
     }
+    body.push_str(&format!(
+        "PostDown = {ipt} -D INPUT -p udp --dport {} -j ACCEPT || true\n",
+        state.listen_port
+    ));
     body.push('\n');
     for peer in state.peers.iter().filter(|p| p.enabled) {
         body.push_str("[Peer]\n");
@@ -493,8 +554,6 @@ fn handshake_map() -> HashMap<String, (u64, u64, u64)> {
     }
     map
 }
-
-use std::collections::HashMap;
 
 fn view_peers(state: &VpnState) -> Vec<PeerView> {
     let stats = handshake_map();
@@ -660,7 +719,7 @@ fn client_conf(cfg: &Config, id: &str) -> Result<(Peer, String), ApiError> {
         .ok_or(ApiError::NotFound)?;
     let endpoint = client_endpoint(&state);
     let conf = format!(
-        "[Interface]\nPrivateKey = {}\nAddress = {}\nDNS = {}\n\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = 25\n",
+        "[Interface]\nPrivateKey = {}\nAddress = {}\nDNS = {}\nMTU = {CLIENT_MTU}\n\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = 25\n",
         peer.private_key,
         peer.address.replace("/32", "/24"),
         client_dns(&state.dns),
@@ -692,6 +751,16 @@ pub fn conf_file_name(cfg: &Config, id: &str) -> Result<String, ApiError> {
 
 pub fn ensure_dirs(cfg: &Config) {
     let _ = std::fs::create_dir_all(dir(cfg));
+    if !privileged() {
+        return;
+    }
+    let state = load_state(cfg);
+    if !state.enabled || state.private_key.is_empty() {
+        return;
+    }
+    if let Err(err) = apply(cfg, &state) {
+        tracing::warn!("vpn apply on start: {err}");
+    }
 }
 
 #[cfg(test)]
@@ -727,5 +796,18 @@ mod tests {
         assert_eq!(client_endpoint(&state), "88.196.57.169:51820");
         state.endpoint = "88.196.57.169:51820".into();
         assert_eq!(client_endpoint(&state), "88.196.57.169:51820");
+    }
+
+    #[test]
+    fn client_profile_matches_firefly_mtu_and_dns() {
+        let conf = format!(
+            "[Interface]\nPrivateKey = x\nAddress = 10.8.0.5/24\nDNS = {}\nMTU = {CLIENT_MTU}\n\n[Peer]\nPublicKey = y\nAllowedIPs = {}\nEndpoint = 88.196.57.169:51820\nPersistentKeepalive = 25\n",
+            CLIENT_DNS,
+            allowed_ips("lan"),
+        );
+        assert!(conf.contains("DNS = 10.8.0.1"));
+        assert!(conf.contains("MTU = 1280"));
+        assert!(conf.contains("PersistentKeepalive = 25"));
+        assert!(conf.contains("10.8.0.0/24"));
     }
 }

@@ -1830,3 +1830,181 @@ details.advanced[open] > summary::before { content: "▾ "; }
   .part-actions { justify-content: flex-start; }
 }
 
+.ok-msg { color: var(--accent); font-size: 13px; margin: 0 0 12px; }
+.vpn-hero {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+  margin-bottom: 16px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.vpn-hero-main {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+.vpn-hero-main .btn { flex-shrink: 0; margin-left: auto; }
+.vpn-hero-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.vpn-hero-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.vpn-hero-title .dot { width: 10px; height: 10px; }
+.vpn-hero-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.vpn-hero-stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.vpn-hero-stats strong { font-size: 16px; }
+.vpn-hero-chart .spark { height: 48px; }
+.vpn-setup {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  min-width: 0;
+  max-width: 100%;
+}
+.vpn-setup .field { max-width: 100%; min-width: 0; }
+.vpn-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  width: 100%;
+}
+.vpn-input-row input { flex: 1; min-width: 0; width: 100%; }
+.vpn-details {
+  margin: 4px 0 18px;
+  padding: 10px 14px 4px;
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+}
+.vpn-details > summary {
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 650;
+  padding: 6px 0 10px;
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.vpn-details > summary::-webkit-details-marker { display: none; }
+.vpn-details > summary::after {
+  content: "Show";
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--muted);
+}
+.vpn-details[open] > summary::after { content: "Hide"; }
+.vpn-details .fwd-grid { margin-top: 4px; box-shadow: none; padding: 0; background: transparent; }
+.vpn-copy-cell {
+  text-align: left;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  border: 0;
+  color: inherit;
+  border-radius: 10px;
+  padding: 10px 12px;
+  min-height: 52px;
+  cursor: pointer;
+}
+.vpn-copy-cell:disabled { opacity: 0.7; cursor: default; }
+.vpn-copy-cell:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.vpn-key { width: 100%; margin: 0 0 12px; }
+.vpn-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  align-items: center;
+  min-width: 0;
+  width: 100%;
+}
+.vpn-add input { flex: 1 1 140px; min-width: 0; }
+.vpn-seg { margin: 0; }
+.vpn-peer {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.vpn-peer.offline { opacity: 0.92; }
+.vpn-peer.disabled { opacity: 0.7; }
+.vpn-peer-head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.vpn-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-weight: 750;
+  color: #fff;
+  flex-shrink: 0;
+}
+.vpn-peer-id { flex: 1; min-width: 0; }
+.vpn-peer-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.vpn-peer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.vpn-peer-chart .spark { height: 56px; }
+.vpn-chart-empty {
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+.vpn-peer-xfer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.vpn-empty {
+  gap: 14px;
+  align-items: center;
+  justify-content: flex-start;
+  color: var(--muted);
+}
+.vpn-empty .ui-icon { color: var(--accent); }
+.vpn-qr-card { max-width: 360px; }
+.vpn-qr-card .qr-wrap { margin: 4px 0 16px; }
+
+@media (max-width: 720px) {
+  .vpn-hero-stats { grid-template-columns: 1fr; }
+  .vpn-peer-head { flex-wrap: wrap; }
+  .vpn-peer-actions { width: 100%; justify-content: flex-start; }
+}
+
+
