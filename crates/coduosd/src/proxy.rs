@@ -765,7 +765,14 @@ pub fn ensure_dirs(cfg: &Config) {
     let _ = std::fs::create_dir_all(conf_d(cfg));
     let _ = std::fs::create_dir_all(dir(cfg).join("acme"));
     let state = load_state(cfg);
-    let _ = write_nginx(cfg, &state);
+    if let Err(err) = write_nginx(cfg, &state) {
+        tracing::warn!("nginx conf: {err}");
+        return;
+    }
+    // nginx often starts in the same second and loads an empty include glob.
+    if let Err(err) = reload_nginx() {
+        tracing::warn!("nginx reload: {err}");
+    }
 }
 
 #[cfg(test)]

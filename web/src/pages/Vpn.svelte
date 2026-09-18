@@ -143,11 +143,12 @@
 <label class="field"><span>DNS for clients</span>
   <input
     value={status?.dns ?? ''}
-    placeholder="1.1.1.1"
+    placeholder="10.8.0.1"
     onchange={(e) => save({ dns: (e.currentTarget as HTMLInputElement).value })}
     disabled={!status?.privileged}
   />
 </label>
+<p class="hint">Use 10.8.0.1 (this VPN). Do not use the home router (192.168.1.1): the phone tries that DNS before handshake, so WireGuard never comes up. 10.8.0.1 is forwarded to the router after the tunnel is up, so names like immich.home work. Re-scan the QR after changing DNS.</p>
 
 <h3 class="group-title">Port forwarding</h3>
 <p class="hint">Clients outside the house need one UDP rule on the router (also called Virtual Server or NAT). Forward to this NAS, not to a phone or PC.</p>

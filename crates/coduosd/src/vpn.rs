@@ -1,3 +1,4 @@
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 
 use qrcode::render::svg;
@@ -11,6 +12,9 @@ use crate::util::{self, privileged, valid_hostname};
 const IFACE: &str = "coduos";
 const SUBNET_PREFIX: &str = "10.8.0.";
 const SERVER_ADDR: &str = "10.8.0.1/24";
+/// In-tunnel resolver. A LAN IP such as 192.168.1.1 cannot be used here: Android
+/// sends DNS into the tunnel before handshake, so the endpoint never resolves.
+const CLIENT_DNS: &str = "10.8.0.1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnState {
@@ -31,7 +35,7 @@ impl Default for VpnState {
             enabled: false,
             listen_port: 51820,
             endpoint: String::new(),
-            dns: "1.1.1.1".into(),
+            dns: CLIENT_DNS.into(),
             public_key: String::new(),
             private_key: String::new(),
             peers: vec![],
@@ -298,6 +302,94 @@ fn lan_cidrs_from_ip_text() -> Vec<String> {
         .collect()
 }
 
+fn default_gateway_v4() -> Option<String> {
+    let out = std::process::Command::new("ip")
+        .args(["-4", "route", "show", "default"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut parts = text.split_whitespace();
+    while let Some(tok) = parts.next() {
+        if tok == "via" {
+            let ip = parts.next()?;
+            if ip.parse::<std::net::Ipv4Addr>().is_ok() {
+                return Some(ip.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn is_lan_dns(ip: &str) -> bool {
+    let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    addr.is_private() && addr != std::net::Ipv4Addr::new(10, 8, 0, 1)
+}
+
+fn client_dns(configured: &str) -> String {
+    let v = configured.trim();
+    if v.is_empty() || is_lan_dns(v) {
+        CLIENT_DNS.into()
+    } else {
+        v.to_string()
+    }
+}
+
+fn normalize_client_dns(raw: &str) -> Result<String, ApiError> {
+    let v = raw.trim();
+    if v.is_empty() {
+        return Ok(CLIENT_DNS.into());
+    }
+    if v.parse::<std::net::Ipv4Addr>().is_err() && !valid_hostname(v) {
+        return Err(ApiError::BadRequest("invalid DNS".into()));
+    }
+    if is_lan_dns(v) {
+        return Err(ApiError::BadRequest(
+            "use 10.8.0.1, not the router. Android sends DNS into the tunnel before handshake, so the VPN never comes up. CoduOS forwards 10.8.0.1:53 to the LAN resolver for .home names.".into(),
+        ));
+    }
+    Ok(v.to_string())
+}
+
+fn ipv4_for_endpoint(host: &str) -> String {
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return host.to_string();
+    }
+    let Ok(mut addrs) = (host, 0u16).to_socket_addrs() else {
+        return host.to_string();
+    };
+    addrs
+        .find_map(|a| match a {
+            SocketAddr::V4(v) => Some(v.ip().to_string()),
+            SocketAddr::V6(_) => None,
+        })
+        .unwrap_or_else(|| host.to_string())
+}
+
+fn client_endpoint(state: &VpnState) -> String {
+    let port = state.listen_port;
+    let raw = state.endpoint.trim();
+    if raw.is_empty() {
+        return format!("nas.local:{port}");
+    }
+    let (host, port) = if let Ok(p) = raw.parse::<std::net::Ipv4Addr>() {
+        (p.to_string(), port)
+    } else if let Some((h, pstr)) = raw.rsplit_once(':') {
+        if h.parse::<std::net::Ipv4Addr>().is_ok() || valid_hostname(h) {
+            (h.to_string(), pstr.parse().unwrap_or(port))
+        } else {
+            (raw.to_string(), port)
+        }
+    } else {
+        (raw.to_string(), port)
+    };
+    format!("{}:{port}", ipv4_for_endpoint(&host))
+}
+
 fn write_conf(cfg: &Config, state: &VpnState) -> Result<(), ApiError> {
     let mut body = String::new();
     body.push_str("[Interface]\n");
@@ -313,6 +405,13 @@ fn write_conf(cfg: &Config, state: &VpnState) -> Result<(), ApiError> {
     body.push_str(
         "PostUp = iptables -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j MASQUERADE || true\n",
     );
+    if let Some(gw) = default_gateway_v4() {
+        for proto in ["udp", "tcp"] {
+            body.push_str(&format!(
+                "PostUp = iptables -t nat -A PREROUTING -i %i -d 10.8.0.1 -p {proto} --dport 53 -j DNAT --to-destination {gw}:53 || true\n"
+            ));
+        }
+    }
     body.push_str("PostDown = iptables -D FORWARD -i %i -j ACCEPT || true\n");
     body.push_str(
         "PostDown = iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT || true\n",
@@ -320,6 +419,13 @@ fn write_conf(cfg: &Config, state: &VpnState) -> Result<(), ApiError> {
     body.push_str(
         "PostDown = iptables -t nat -D POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j MASQUERADE || true\n",
     );
+    if let Some(gw) = default_gateway_v4() {
+        for proto in ["udp", "tcp"] {
+            body.push_str(&format!(
+                "PostDown = iptables -t nat -D PREROUTING -i %i -d 10.8.0.1 -p {proto} --dport 53 -j DNAT --to-destination {gw}:53 || true\n"
+            ));
+        }
+    }
     body.push('\n');
     for peer in state.peers.iter().filter(|p| p.enabled) {
         body.push_str("[Peer]\n");
@@ -421,7 +527,7 @@ pub fn status(cfg: &Config) -> VpnStatus {
         enabled: state.enabled,
         listen_port: state.listen_port,
         endpoint: state.endpoint.clone(),
-        dns: state.dns.clone(),
+        dns: client_dns(&state.dns),
         public_key: state.public_key.clone(),
         address: SERVER_ADDR.into(),
         peers: view_peers(&state),
@@ -453,10 +559,7 @@ pub fn update_settings(cfg: &Config, body: VpnSettingsIn) -> Result<VpnStatus, A
         state.endpoint = v;
     }
     if let Some(v) = body.dns {
-        if !v.is_empty() && v.parse::<std::net::Ipv4Addr>().is_err() && !valid_hostname(&v) {
-            return Err(ApiError::BadRequest("invalid DNS".into()));
-        }
-        state.dns = v;
+        state.dns = normalize_client_dns(&v)?;
     }
     if let Some(p) = body.listen_port {
         if p < 1 {
@@ -555,18 +658,12 @@ fn client_conf(cfg: &Config, id: &str) -> Result<(Peer, String), ApiError> {
         .find(|p| p.id == id)
         .cloned()
         .ok_or(ApiError::NotFound)?;
-    let endpoint = if state.endpoint.is_empty() {
-        format!("nas.local:{}", state.listen_port)
-    } else if state.endpoint.contains(':') {
-        state.endpoint.clone()
-    } else {
-        format!("{}:{}", state.endpoint, state.listen_port)
-    };
+    let endpoint = client_endpoint(&state);
     let conf = format!(
         "[Interface]\nPrivateKey = {}\nAddress = {}\nDNS = {}\n\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = 25\n",
         peer.private_key,
         peer.address.replace("/32", "/24"),
-        state.dns,
+        client_dns(&state.dns),
         state.public_key,
         allowed_ips(&peer.tunnel),
         endpoint,
@@ -611,5 +708,24 @@ mod tests {
     #[test]
     fn full_tunnel_routes_everything() {
         assert_eq!(allowed_ips("full"), "0.0.0.0/0, ::/0");
+    }
+
+    #[test]
+    fn lan_router_is_not_client_dns() {
+        assert_eq!(client_dns("192.168.1.1"), "10.8.0.1");
+        assert_eq!(client_dns("1.1.1.1"), "1.1.1.1");
+        assert_eq!(client_dns(""), "10.8.0.1");
+        assert!(normalize_client_dns("192.168.1.1").is_err());
+        assert_eq!(normalize_client_dns("10.8.0.1").unwrap(), "10.8.0.1");
+    }
+
+    #[test]
+    fn endpoint_host_port_split() {
+        let mut state = VpnState::default();
+        state.endpoint = "88.196.57.169".into();
+        state.listen_port = 51820;
+        assert_eq!(client_endpoint(&state), "88.196.57.169:51820");
+        state.endpoint = "88.196.57.169:51820".into();
+        assert_eq!(client_endpoint(&state), "88.196.57.169:51820");
     }
 }
