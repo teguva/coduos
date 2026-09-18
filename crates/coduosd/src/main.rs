@@ -3,6 +3,7 @@ mod battery;
 mod config;
 mod db;
 mod ddns;
+mod display;
 mod docker;
 mod error;
 mod github;
@@ -53,14 +54,18 @@ async fn main() -> Result<()> {
     let (cfg, config_path) = config::Config::load(cli.config.as_deref())?;
     std::fs::create_dir_all(&cfg.data_dir)
         .with_context(|| format!("create data dir {}", cfg.data_dir.display()))?;
-    std::fs::create_dir_all(cfg.apps_dir())?;
     std::fs::create_dir_all(cfg.icons_dir())?;
     vpn::ensure_dirs(&cfg);
     proxy::ensure_dirs(&cfg);
     ddns::ensure_dirs(&cfg);
     seed_icons_readme(&cfg.icons_dir());
     storage::remount_persisted(&cfg);
+    let apps_dir = cfg.apps_dir();
+    std::fs::create_dir_all(&apps_dir)
+        .with_context(|| format!("create apps dir {}", apps_dir.display()))?;
+    docker::migrate_legacy_app_dirs(&cfg.legacy_apps_dir(), &apps_dir);
     battery::apply_persisted(&cfg);
+    display::apply_persisted(&cfg);
 
     if !config_path.exists() {
         if let Err(err) = cfg.save(&config_path) {

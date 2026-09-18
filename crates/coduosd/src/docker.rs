@@ -422,6 +422,51 @@ pub fn remove_app_dir(apps_dir: &Path, id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Move compose app folders from the old `{data_dir}/apps` tree into `/DATA/AppData`.
+pub fn migrate_legacy_app_dirs(from: &Path, to: &Path) {
+    if from == to || !from.is_dir() {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(from) else {
+        return;
+    };
+    let mut prepared = false;
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let Some(name_str) = name.to_str() else { continue };
+        if name_str.starts_with('.') {
+            continue;
+        }
+        let src = ent.path();
+        if !src.is_dir() {
+            continue;
+        }
+        let dest = to.join(&name);
+        if dest.exists() {
+            continue;
+        }
+        if !prepared {
+            if let Err(err) = std::fs::create_dir_all(to) {
+                tracing::warn!("apps dir {}: {err}", to.display());
+                return;
+            }
+            prepared = true;
+        }
+        let moved = std::fs::rename(&src, &dest).is_ok()
+            || std::process::Command::new("mv")
+                .arg(&src)
+                .arg(&dest)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+        if moved {
+            tracing::info!("moved app {name_str} to {}", dest.display());
+        } else {
+            tracing::warn!("could not move {} to {}", src.display(), dest.display());
+        }
+    }
+}
+
 pub async fn compose(
     apps_dir: &Path,
     id: &str,
@@ -834,6 +879,28 @@ x-coduos:
             env.contains(&format!("UPLOAD_LOCATION={abs}")),
             "expected absolute UPLOAD_LOCATION in {env}"
         );
+    }
+
+    #[test]
+    fn migrate_legacy_app_dirs_moves_app_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "coduos-migrate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let from = root.join("apps");
+        let to = root.join("AppData");
+        std::fs::create_dir_all(from.join("immich")).unwrap();
+        std::fs::write(from.join("immich/compose.yml"), b"x").unwrap();
+        migrate_legacy_app_dirs(&from, &to);
+        let moved = to.join("immich/compose.yml").is_file();
+        let leftover = from.join("immich").exists();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(moved);
+        assert!(!leftover);
     }
 }
 

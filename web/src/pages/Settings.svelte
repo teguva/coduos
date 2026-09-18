@@ -30,6 +30,7 @@
   type Settings = {
     bind: string;
     data_dir: string;
+    apps_dir?: string;
     github_owner: string;
     github_repo: string;
     file_roots: Root[];
@@ -79,6 +80,15 @@
     }[];
     limit: BatteryLimit;
   };
+  type DisplayOut = {
+    available: boolean;
+    privileged: boolean;
+    off: boolean;
+    ignore_lid: boolean;
+    lid_available: boolean;
+    hint: string;
+    lid_hint: string;
+  };
 
   const nav = [
     { id: 'general', label: 'General', icon: 'settings' },
@@ -106,6 +116,8 @@
   let confirmUpdate = $state(false);
   let chargeDraft = $state(80);
   let startDraft = $state(75);
+  let display = $state<DisplayOut | null>(null);
+  let displayBusy = $state(false);
   let powerConfirm = $state<'reboot' | 'shutdown' | null>(null);
   let powerBusy = $state('');
 
@@ -124,6 +136,11 @@
       if (battery?.limit.start_pct != null) startDraft = battery.limit.start_pct;
     } catch {
       battery = null;
+    }
+    try {
+      display = await api<DisplayOut>('/api/system/display');
+    } catch {
+      display = null;
     }
   }
 
@@ -237,6 +254,38 @@
     } catch (err: any) {
       error = err.message;
     }
+  }
+
+  async function patchDisplay(body: { off?: boolean; ignore_lid?: boolean }, noticeText: string) {
+    if (!display) return;
+    error = '';
+    notice = '';
+    displayBusy = true;
+    try {
+      display = await api<DisplayOut>('/api/system/display', {
+        method: 'POST',
+        body: JSON.stringify(body)
+      });
+      notice = noticeText;
+    } catch (err: any) {
+      error = err.message;
+    } finally {
+      displayBusy = false;
+    }
+  }
+
+  async function setDisplayOff(off: boolean) {
+    await patchDisplay(
+      { off },
+      off ? 'Built-in display and backlight are off.' : 'Built-in display is on.'
+    );
+  }
+
+  async function setIgnoreLid(ignore: boolean) {
+    await patchDisplay(
+      { ignore_lid: ignore },
+      ignore ? 'Lid close is ignored.' : 'Lid close uses the system default.'
+    );
   }
 
   async function applyUpdate() {
@@ -399,6 +448,39 @@
         </section>
       {/if}
 
+      {#if display?.available || display?.lid_available}
+        <section class="set-block" id="display">
+          <h3>Laptop</h3>
+          {#if !display.privileged}
+            <div class="banner">These laptop options need the installed daemon running as root.</div>
+          {/if}
+          {#if display.available}
+            <label class="toggle-row">
+              <span>Switch off built-in display and backlight</span>
+              <input
+                type="checkbox"
+                checked={display.off}
+                disabled={!display.privileged || displayBusy}
+                onchange={(e) => setDisplayOff(e.currentTarget.checked)}
+              />
+            </label>
+            <p class="hint">{display.hint}</p>
+          {/if}
+          {#if display.lid_available}
+            <label class="toggle-row">
+              <span>Do not react to lid close</span>
+              <input
+                type="checkbox"
+                checked={display.ignore_lid}
+                disabled={!display.privileged || displayBusy}
+                onchange={(e) => setIgnoreLid(e.currentTarget.checked)}
+              />
+            </label>
+            <p class="hint">{display.lid_hint}</p>
+          {/if}
+        </section>
+      {/if}
+
       <section class="set-block">
         <h3>Files locations</h3>
         <p class="hint">Folders shown in the Files app.</p>
@@ -499,6 +581,7 @@
             <dt>Hostname</dt><dd>{settings.hostname}</dd>
             <dt>Bind</dt><dd>{settings.bind}</dd>
             <dt>Data dir</dt><dd>{settings.data_dir}</dd>
+            <dt>Apps dir</dt><dd>{settings.apps_dir || '—'}</dd>
           </dl>
           <p class="hint">When nginx is in front, the dashboard is on ports 80 and 443.</p>
         </section>

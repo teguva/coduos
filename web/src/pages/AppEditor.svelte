@@ -544,7 +544,7 @@
           <p class="hint">Kept from YAML: {extras.join(', ')}</p>
         {/if}
         {#if appDir}
-          <p class="hint">App folder on this computer: <code>{appDir}</code>. Relative host paths like <code>./library</code> are created inside it — Files only lists Home and mounted disks.</p>
+          <p class="hint">App folder: <code>{appDir}</code>. Relative host paths like <code>./library</code> are created inside it. New apps go in <code>/DATA/AppData</code> when that disk is mounted.</p>
         {/if}
         <p class="hint">{id ? (status.message || '') : 'Name the app, then set services and environment.'}</p>
       </section>

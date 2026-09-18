@@ -201,7 +201,7 @@
   {:else}
     {namedShared + namedSvc} variable{namedShared + namedSvc === 1 ? '' : 's'} — image tags, upload folders, and container settings.
   {/if}
-  Values like <code>./library</code> are created next to this app, not in Files. Put photos on a mounted disk (Storage) if you want them there.
+  Values like <code>./library</code> are created in this app folder. With a Data disk that is <code>/DATA/AppData/&lt;app&gt;</code> in Files.
 </p>
 {#if envFiles.length}
   <p class="hint">This stack also reads {envFiles.join(', ')}. Upload that file so passwords and paths show up here.</p>

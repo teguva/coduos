@@ -9,6 +9,7 @@ use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
 
 use crate::battery::{self, BatteryPack, ChargeLimitIn};
+use crate::display::{self, DisplayIn, DisplayOut};
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::stats::{self, DockerStat, ProcInfo, SystemSummary};
@@ -23,6 +24,7 @@ pub fn router() -> Router<AppState> {
         .route("/system/tasks", get(tasks))
         .route("/system/process/{pid}/signal", post(signal))
         .route("/system/battery", get(battery).post(set_battery))
+        .route("/system/display", get(get_display).post(set_display))
         .route("/system/power", post(power))
 }
 
@@ -102,6 +104,30 @@ async fn set_battery(
         &state.config_path,
         body.limit_pct,
         body.start_pct,
+    )?))
+}
+
+async fn get_display(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<DisplayOut>, ApiError> {
+    current_user(&state, &jar).await?;
+    let cfg = state.config.read().await;
+    Ok(Json(display::snapshot(&cfg)))
+}
+
+async fn set_display(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<DisplayIn>,
+) -> Result<Json<DisplayOut>, ApiError> {
+    current_user(&state, &jar).await?;
+    let mut cfg = state.config.write().await;
+    Ok(Json(display::apply_and_save(
+        &mut cfg,
+        &state.config_path,
+        body.off,
+        body.ignore_lid,
     )?))
 }
 

@@ -6,7 +6,7 @@ Not a CasaOS/ZimaOS fork. No IceWhale services, no app-store ZIP, no message bus
 
 ## Install
 
-Needs a supported package manager (`apt`, `pacman`, `dnf`, or `apk`). The installer asks **yes/no** for Docker (Apps), nginx (ports 80/443 and reverse proxy), and WireGuard (VPN), then installs those packages and enables the matching units.
+Needs a supported package manager (`apt`, `pacman`, `dnf`, or `apk`). The installer asks for Docker (Apps), nginx (ports 80/443 and reverse proxy), WireGuard (VPN), and where to put the **Data** folder (default `/DATA`, as a folder or a mounted extra disk). Compose apps then live in `Data/AppData`.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/install.sh | sudo bash
@@ -15,8 +15,10 @@ curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/install.
 Unattended:
 
 ```sh
-sudo CODUOS_DOCKER=yes CODUOS_NGINX=yes CODUOS_WIREGUARD=no bash -c \
+sudo CODUOS_DOCKER=yes CODUOS_NGINX=yes CODUOS_WIREGUARD=no \
+  CODUOS_DATA=/DATA CODUOS_DATA_SETUP=folder bash -c \
   'curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/install.sh | bash'
+# CODUOS_DATA_SETUP=folder|mount|skip   mount also needs CODUOS_DATA_DEVICE=/dev/sdX1
 ```
 
 Open `http://<host>/` if nginx was enabled, otherwise `http://<host>:13209/`. Create the admin account, then install apps from Compose YAML.
@@ -61,6 +63,6 @@ scripts/          # install, update, uninstall, pack-release
 ```
 
 Config: `/etc/coduos/coduos.toml` (bind, data dir, file roots, unit allowlist).
-State: `/var/lib/coduos/coduos.db` and `/var/lib/coduos/apps/<id>/compose.yml`.
+State: `/var/lib/coduos/coduos.db`. Compose apps: `/DATA/AppData/<id>/` when `/DATA` is mounted, otherwise `/var/lib/coduos/apps/<id>/`.
 
 Host units are **allowlisted**. The UI never sends a free-form systemd unit name.

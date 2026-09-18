@@ -1,5 +1,7 @@
 bind = "127.0.0.1:13209"
 data_dir = "/var/lib/coduos"
+# Compose apps. Uncomment to override; default is /DATA/AppData when /DATA exists.
+# apps_dir = "/DATA/AppData"
 www_dir = "/usr/share/coduos/www"
 github_owner = "teguva"
 github_repo = "coduos"

@@ -23,6 +23,7 @@ pub fn router() -> Router<AppState> {
 struct SettingsOut {
     bind: String,
     data_dir: String,
+    apps_dir: String,
     www_dir: String,
     github_owner: String,
     github_repo: String,
@@ -47,6 +48,7 @@ fn settings_out(cfg: &crate::config::Config) -> SettingsOut {
     SettingsOut {
         bind: cfg.bind.clone(),
         data_dir: cfg.data_dir.display().to_string(),
+        apps_dir: cfg.apps_dir().display().to_string(),
         www_dir: cfg.www_dir.display().to_string(),
         github_owner: cfg.github_owner.clone(),
         github_repo: cfg.github_repo.clone(),

@@ -21,10 +21,19 @@ pub struct Config {
     pub units: Vec<UnitSpec>,
     #[serde(default)]
     pub storage_mounts: Vec<StorageMount>,
+    /// Compose app folders. Empty = `/DATA/AppData` when `/DATA` exists, otherwise `{data_dir}/apps`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_favorites: Vec<FileFavorite>,
     #[serde(default, skip_serializing_if = "BatteryConfig::is_empty")]
     pub battery: BatteryConfig,
+    /// Power down the built-in laptop panel and backlight (NAS-on-laptop).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub display_off: bool,
+    /// Ignore lid close (do not suspend / power off).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ignore_lid: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -156,8 +165,11 @@ impl Config {
             file_roots: default_file_roots(),
             units: default_units(),
             storage_mounts: Vec::new(),
+            apps_dir: None,
             file_favorites: Vec::new(),
             battery: BatteryConfig::default(),
+            display_off: false,
+            ignore_lid: false,
         };
         if !running_as_root() {
             cfg.bind = "127.0.0.1:13209".into();
@@ -183,6 +195,14 @@ impl Config {
     }
 
     pub fn apps_dir(&self) -> PathBuf {
+        resolve_apps_dir(
+            &self.data_dir,
+            self.apps_dir.as_deref(),
+            Path::new("/DATA").is_dir(),
+        )
+    }
+
+    pub fn legacy_apps_dir(&self) -> PathBuf {
         self.data_dir.join("apps")
     }
 
@@ -196,6 +216,18 @@ impl Config {
 
     pub fn unit(&self, id: &str) -> Option<&UnitSpec> {
         self.units.iter().find(|u| u.id == id)
+    }
+}
+
+/// CasaOS-style default: `/DATA/AppData` when the Data volume is present.
+fn resolve_apps_dir(data_dir: &Path, configured: Option<&Path>, data_volume: bool) -> PathBuf {
+    if let Some(p) = configured.filter(|p| !p.as_os_str().is_empty()) {
+        return p.to_path_buf();
+    }
+    if data_volume {
+        PathBuf::from("/DATA/AppData")
+    } else {
+        data_dir.join("apps")
     }
 }
 
@@ -302,5 +334,27 @@ pub fn slugify(name: &str) -> String {
         "app".into()
     } else {
         out.chars().take(48).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apps_dir_uses_data_appdata_when_volume_exists() {
+        let data = Path::new("/var/lib/coduos");
+        assert_eq!(
+            resolve_apps_dir(data, None, true),
+            PathBuf::from("/DATA/AppData")
+        );
+        assert_eq!(
+            resolve_apps_dir(data, None, false),
+            PathBuf::from("/var/lib/coduos/apps")
+        );
+        assert_eq!(
+            resolve_apps_dir(data, Some(Path::new("/mnt/apps")), true),
+            PathBuf::from("/mnt/apps")
+        );
     }
 }
