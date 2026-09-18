@@ -134,8 +134,12 @@
   function updateConfirmBody() {
     const ver = update?.latest || '';
     let body = `CoduOS ${ver} will be downloaded and installed. The dashboard restarts; you stay signed in.`;
-    if (missingPkgs.length && installPkgs) {
-      body += ` Also installs: ${pkgList(missingPkgs)}.`;
+    if (installPkgs) {
+      if (missingPkgs.length) {
+        body += ` Also installs: ${pkgList(missingPkgs)}, and upgrades listed apt packages.`;
+      } else {
+        body += ' Also refreshes listed apt packages (parted, e2fsprogs, openssl, Docker Compose).';
+      }
     } else if (missingPkgs.length) {
       body += ` Missing packages will not be installed: ${missingPkgs.map((p) => p.name).join(', ')}.`;
     }
@@ -308,7 +312,7 @@
         packages_error?: string | null;
       }>('/api/update', {
         method: 'POST',
-        body: JSON.stringify({ install_packages: installPkgs && missingPkgs.length > 0 })
+        body: JSON.stringify({ install_packages: installPkgs })
       });
       const extra = res.packages_installed?.length
         ? ` Installed ${res.packages_installed.join(', ')}.`
@@ -341,7 +345,7 @@
       } else if (res.installed.length) {
         notice = `Installed ${res.installed.join(', ')}.`;
       } else {
-        notice = 'All listed packages are already installed.';
+        notice = 'Listed packages are present and were refreshed.';
       }
     } catch (err: any) {
       error = err.message;
@@ -546,22 +550,22 @@
           {/if}
           {#if missingPkgs.length}
             <p class="hint">Missing packages: {pkgList(missingPkgs)}</p>
-            {#if update.can_install_packages}
-              {#if !update.up_to_date && !update.error}
-                <label class="toggle-row">
-                  <span>Install missing packages with this update</span>
-                  <input type="checkbox" bind:checked={installPkgs} disabled={applying || pkgBusy} />
-                </label>
-              {:else}
-                <button class="btn secondary" disabled={pkgBusy} onclick={installMissingPackages}>
-                  {pkgBusy ? 'Installing…' : 'Install missing packages'}
-                </button>
-              {/if}
-            {:else if !settings?.privileged}
-              <p class="hint">Installing packages needs the installed daemon running as root.</p>
-            {/if}
           {:else if update.packages?.length}
-            <p class="hint">Packages: {update.packages.map((p) => p.name).join(', ')} — all installed.</p>
+            <p class="hint">Packages: {update.packages.map((p) => p.name).join(', ')} — all installed. Update refreshes them via apt.</p>
+          {/if}
+          {#if update.can_install_packages}
+            {#if !update.up_to_date && !update.error}
+              <label class="toggle-row">
+                <span>Install missing packages and update listed apt packages</span>
+                <input type="checkbox" bind:checked={installPkgs} disabled={applying || pkgBusy} />
+              </label>
+            {:else}
+              <button class="btn secondary" disabled={pkgBusy} onclick={installMissingPackages}>
+                {pkgBusy ? 'Updating packages…' : missingPkgs.length ? 'Install missing packages' : 'Update listed packages'}
+              </button>
+            {/if}
+          {:else if !settings?.privileged && (missingPkgs.length || update.packages?.length)}
+            <p class="hint">Installing packages needs the installed daemon running as root.</p>
           {/if}
           <p class="hint">github.com/{settings?.github_owner}/{settings?.github_repo}</p>
         {/if}

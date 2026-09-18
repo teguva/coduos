@@ -2,10 +2,12 @@
 # Update an existing CoduOS install from the latest GitHub Release.
 # Replaces the daemon, web UI, and unit files. Keeps config and data.
 # Compares packaging/deps against installed packages and offers to install missing ones.
-# Does not install or change Docker, nginx, or WireGuard.
+# Does not enable Docker, nginx, or WireGuard if they were skipped at install.
+# Installs missing listed deps (including Docker Compose) and upgrades those apt packages.
 #
 #   curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/update.sh | sudo bash
 #   CODUOS_PACKAGES=no sudo -E bash scripts/update.sh   # skip missing packages
+#   CODUOS_APT_UPGRADE=no sudo -E bash scripts/update.sh  # skip apt upgrade of listed packages
 set -euo pipefail
 
 REPO="${CODUOS_REPO:-teguva/coduos}"
@@ -72,6 +74,29 @@ pkg_install() {
   esac
 }
 
+# Try candidate package names until one installs.
+pkg_install_any() {
+  local candidate
+  for candidate in "$@"; do
+    if pkg_install "${candidate}"; then
+      return 0
+    fi
+  done
+  echo "Could not install any of: $*" >&2
+  return 1
+}
+
+dep_ok() {
+  local cmd="$1"
+  local bin rest
+  read -r bin rest <<<"${cmd}"
+  if [[ -z "${rest}" ]]; then
+    command -v "${bin}" >/dev/null 2>&1
+  else
+    "${bin}" ${rest} >/dev/null 2>&1
+  fi
+}
+
 ask_yes() {
   local prompt="$1"
   local default="${2:-y}"
@@ -109,6 +134,7 @@ fallback_deps() {
 parted|parted|Format a whole disk
 e2fsprogs|mkfs.ext4|Format ext4 volumes
 openssl|openssl|HTTPS certificates and LAN CA
+docker-compose-v2,docker-compose-plugin,docker-compose,docker-cli-compose|docker compose version|Docker Compose for apps
 EOF
 }
 
@@ -167,6 +193,7 @@ else
   deps_text=$(fallback_deps)
 fi
 missing_pkgs=()
+all_specs=()
 echo
 echo "Checking packages…"
 while IFS='|' read -r pkg cmd reason; do
@@ -174,22 +201,50 @@ while IFS='|' read -r pkg cmd reason; do
   [[ -z "${pkg}" || "${pkg}" == \#* ]] && continue
   cmd="${cmd#"${cmd%%[![:space:]]*}"}"
   reason="${reason#"${reason%%[![:space:]]*}"}"
-  if command -v "${cmd}" >/dev/null 2>&1; then
-    echo "  ${pkg}: installed"
+  IFS=',' read -r -a alts <<<"${pkg}"
+  all_specs+=("${pkg}")
+  if dep_ok "${cmd}"; then
+    echo "  ${alts[0]}: installed"
   else
-    echo "  ${pkg}: missing — ${reason}"
+    echo "  ${alts[0]}: missing — ${reason}"
     missing_pkgs+=("${pkg}")
   fi
 done <<< "${deps_text}"
 if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
   echo "Missing: ${missing_pkgs[*]}"
   if ask_yes "Install missing packages?" y "${CODUOS_PACKAGES:-}"; then
-    pkg_install "${missing_pkgs[@]}" || true
+    for spec in "${missing_pkgs[@]}"; do
+      IFS=',' read -r -a alts <<<"${spec}"
+      pkg_install_any "${alts[@]}" || true
+    done
   else
-    echo "Skipping package install."
+    echo "Skipping missing package install."
   fi
 else
   echo "All listed packages are installed."
+fi
+if [[ "${PM}" == apt ]]; then
+  if ask_yes "Update listed apt packages?" y "${CODUOS_APT_UPGRADE:-}"; then
+    export DEBIAN_FRONTEND=noninteractive
+    if [[ "${APT_UPDATED:-0}" -ne 1 ]]; then
+      apt-get update -qq
+      APT_UPDATED=1
+    fi
+    upgrade=()
+    for spec in "${all_specs[@]}"; do
+      IFS=',' read -r -a alts <<<"${spec}"
+      for p in "${alts[@]}"; do
+        p="${p#"${p%%[![:space:]]*}"}"
+        [[ -z "${p}" ]] && continue
+        if dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q 'install ok installed'; then
+          upgrade+=("${p}")
+        fi
+      done
+    done
+    if [[ ${#upgrade[@]} -gt 0 ]]; then
+      apt-get install -y "${upgrade[@]}" || true
+    fi
+  fi
 fi
 
 install -d /usr/bin /usr/share/coduos /usr/lib/systemd/system

@@ -343,6 +343,14 @@ pub async fn apply(
                 0o644,
             )?;
         }
+        let depsf = root.join("usr/share/coduos/deps");
+        if depsf.is_file() {
+            let dest = Path::new("/usr/share/coduos/deps");
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            install_file(&depsf, dest, 0o644)?;
+        }
         let _ = util::run("systemctl", &["daemon-reload"]);
         Ok::<(), ApiError>(())
     }
@@ -352,7 +360,7 @@ pub async fn apply(
     let mut packages_installed = Vec::new();
     let mut packages_error = None;
     if install_packages {
-        match tokio::task::spawn_blocking(packages::install_missing)
+        match tokio::task::spawn_blocking(packages::sync)
             .await
             .map_err(ApiError::internal)?
         {

@@ -454,12 +454,27 @@ fi
 
 if [[ "${WITH_DOCKER}" -eq 1 ]]; then
   case "${PM}" in
-    apt) pkg_install_any docker.io docker-ce docker ;;
-    pacman) pkg_install docker ;;
-    dnf) pkg_install_any docker docker-ce moby-engine ;;
-    apk) pkg_install docker ;;
+    apt)
+      pkg_install_any docker.io docker-ce docker
+      pkg_install_any docker-compose-v2 docker-compose-plugin
+      ;;
+    pacman)
+      pkg_install docker
+      pkg_install_any docker-compose docker-compose-plugin
+      ;;
+    dnf)
+      pkg_install_any docker docker-ce moby-engine
+      pkg_install_any docker-compose-plugin docker-compose
+      ;;
+    apk)
+      pkg_install docker
+      pkg_install_any docker-cli-compose docker-compose
+      ;;
     *) echo "Install Docker yourself, then re-run." >&2 ;;
   esac
+  if ! docker compose version >/dev/null 2>&1; then
+    echo "warning: Docker Compose v2 is not installed; Apps need the docker-compose-v2 (or docker-compose-plugin) package" >&2
+  fi
 fi
 if [[ "${WITH_NGINX}" -eq 1 ]]; then
   pkg_install nginx
