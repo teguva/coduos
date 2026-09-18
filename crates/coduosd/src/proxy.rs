@@ -40,8 +40,12 @@ pub struct ProxyStatus {
     pub privileged: bool,
     pub nginx_available: bool,
     pub certbot_available: bool,
+    pub openssl_available: bool,
     pub dashboard_upstream: String,
     pub dashboard_tls: String,
+    pub dashboard_names: Vec<String>,
+    pub ca_ready: bool,
+    pub ca_fingerprint: Option<String>,
     pub hosts: Vec<ProxyHost>,
     pub error: Option<String>,
 }
@@ -134,14 +138,41 @@ fn ssl_listen(host: &str, crt: &Path, key: &Path, extra: &str) -> String {
     )
 }
 
-fn lan_certs(cfg: &Config) -> Result<(PathBuf, PathBuf), ApiError> {
-    let certs = dir(cfg).join("certs");
+fn certs_dir(cfg: &Config) -> PathBuf {
+    dir(cfg).join("certs")
+}
+
+fn restrict_key(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+fn require_openssl() -> Result<(), ApiError> {
+    if util::which("openssl") {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest("openssl is not installed".into()))
+    }
+}
+
+fn ensure_ca(cfg: &Config) -> Result<(PathBuf, PathBuf), ApiError> {
+    let certs = certs_dir(cfg);
     std::fs::create_dir_all(&certs)?;
-    let crt = certs.join("lan.crt");
-    let key = certs.join("lan.key");
+    let crt = certs.join("ca.crt");
+    let key = certs.join("ca.key");
     if crt.exists() && key.exists() {
         return Ok((crt, key));
     }
+    require_openssl()?;
+    let crt_s = crt.display().to_string();
+    let key_s = key.display().to_string();
     util::run_ok(
         "openssl",
         &[
@@ -149,18 +180,327 @@ fn lan_certs(cfg: &Config) -> Result<(PathBuf, PathBuf), ApiError> {
             "-x509",
             "-nodes",
             "-newkey",
-            "rsa:2048",
+            "rsa:4096",
             "-keyout",
-            &key.display().to_string(),
+            &key_s,
             "-out",
-            &crt.display().to_string(),
+            &crt_s,
             "-days",
-            "825",
+            "3650",
             "-subj",
-            "/CN=coduos.local",
+            "/O=CoduOS/CN=CoduOS LAN CA",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE,pathlen:0",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
         ],
     )?;
+    restrict_key(&key);
     Ok((crt, key))
+}
+
+fn leaf_paths(cfg: &Config, stem: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let certs = certs_dir(cfg);
+    (
+        certs.join(format!("{stem}.crt")),
+        certs.join(format!("{stem}.key")),
+        certs.join(format!("{stem}.fullchain.crt")),
+        certs.join(format!("{stem}.san")),
+    )
+}
+
+fn leaf_trusted(ca: &Path, crt: &Path) -> bool {
+    util::run(
+        "openssl",
+        &[
+            "verify",
+            "-CAfile",
+            &ca.display().to_string(),
+            &crt.display().to_string(),
+        ],
+    )
+    .ok()
+    .is_some_and(|out| out.status.success())
+}
+
+fn issue_leaf(cfg: &Config, stem: &str, sans: &[String]) -> Result<(PathBuf, PathBuf), ApiError> {
+    if stem.is_empty()
+        || stem.len() > 64
+        || !stem
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(ApiError::BadRequest("invalid certificate name".into()));
+    }
+    if sans.is_empty() {
+        return Err(ApiError::BadRequest("certificate needs a hostname".into()));
+    }
+    let (ca_crt, ca_key) = ensure_ca(cfg)?;
+    let (crt, key, fullchain, san_path) = leaf_paths(cfg, stem);
+    let san_line = sans.join(",");
+    if crt.exists()
+        && key.exists()
+        && fullchain.exists()
+        && std::fs::read_to_string(&san_path).ok().as_deref() == Some(san_line.as_str())
+        && leaf_trusted(&ca_crt, &crt)
+    {
+        return Ok((fullchain, key));
+    }
+    require_openssl()?;
+    let certs = certs_dir(cfg);
+    let csr = certs.join(format!("{stem}.csr"));
+    let ext = certs.join(format!("{stem}.ext"));
+    let cn = cert_cn(sans);
+    let crt_s = crt.display().to_string();
+    let key_s = key.display().to_string();
+    let csr_s = csr.display().to_string();
+    let ext_s = ext.display().to_string();
+    let ca_crt_s = ca_crt.display().to_string();
+    let ca_key_s = ca_key.display().to_string();
+    let serial = certs.join("ca.srl").display().to_string();
+    std::fs::write(
+        &ext,
+        format!(
+            "basicConstraints = CA:FALSE\nkeyUsage = digitalSignature,keyEncipherment\nextendedKeyUsage = serverAuth\nsubjectAltName = {san_line}\n"
+        ),
+    )?;
+    util::run_ok(
+        "openssl",
+        &[
+            "req",
+            "-new",
+            "-nodes",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            &key_s,
+            "-out",
+            &csr_s,
+            "-subj",
+            &format!("/O=CoduOS/CN={cn}"),
+        ],
+    )?;
+    restrict_key(&key);
+    util::run_ok(
+        "openssl",
+        &[
+            "x509",
+            "-req",
+            "-in",
+            &csr_s,
+            "-CA",
+            &ca_crt_s,
+            "-CAkey",
+            &ca_key_s,
+            "-CAserial",
+            &serial,
+            "-CAcreateserial",
+            "-out",
+            &crt_s,
+            "-days",
+            "825",
+            "-extfile",
+            &ext_s,
+        ],
+    )?;
+    let mut chain = std::fs::read(&crt)?;
+    chain.push(b'\n');
+    chain.extend(std::fs::read(&ca_crt)?);
+    std::fs::write(&fullchain, chain)?;
+    std::fs::write(&san_path, &san_line)?;
+    let _ = std::fs::remove_file(csr);
+    let _ = std::fs::remove_file(ext);
+    Ok((fullchain, key))
+}
+
+fn cert_cn(sans: &[String]) -> String {
+    let raw = sans
+        .iter()
+        .find_map(|s| s.strip_prefix("DNS:"))
+        .or_else(|| sans.iter().find_map(|s| s.strip_prefix("IP:")))
+        .unwrap_or("coduos");
+    let cn: String = raw.chars().take(64).collect();
+    if cn.is_empty() {
+        "coduos".into()
+    } else {
+        cn
+    }
+}
+
+fn host_sans(hostname: &str) -> Vec<String> {
+    if hostname.parse::<std::net::Ipv4Addr>().is_ok() {
+        vec![format!("IP:{hostname}")]
+    } else {
+        vec![format!("DNS:{hostname}")]
+    }
+}
+
+fn dashboard_sans() -> Vec<String> {
+    let mut out = vec!["DNS:localhost".into(), "IP:127.0.0.1".into()];
+    if let Ok(h) = hostname::get() {
+        if let Ok(name) = h.into_string() {
+            let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
+            if util::valid_hostname(&name) {
+                out.push(format!("DNS:{name}"));
+                if !name.contains('.') {
+                    let mdns = format!("{name}.local");
+                    if util::valid_hostname(&mdns) {
+                        out.push(format!("DNS:{mdns}"));
+                    }
+                }
+            }
+        }
+    }
+    for ip in lan_ipv4s() {
+        out.push(format!("IP:{ip}"));
+    }
+    dedup_keep(out)
+}
+
+fn dashboard_display_names() -> Vec<String> {
+    dashboard_sans()
+        .into_iter()
+        .filter_map(|s| {
+            s.strip_prefix("DNS:")
+                .or_else(|| s.strip_prefix("IP:"))
+                .map(|v| v.to_string())
+        })
+        .filter(|n| n != "localhost" && n != "127.0.0.1")
+        .collect()
+}
+
+fn dedup_keep(items: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
+}
+
+fn lan_ipv4s() -> Vec<String> {
+    let mut ips = ipv4s_from_ip_json();
+    if ips.is_empty() {
+        ips = ipv4s_from_ip_text();
+    }
+    ips.sort();
+    ips.dedup();
+    ips
+}
+
+fn skip_lan_ip(ip: &str) -> bool {
+    ip.parse::<std::net::Ipv4Addr>()
+        .ok()
+        .is_none_or(|a| a.is_loopback() || a.is_link_local() || a.is_unspecified() || a.is_multicast())
+}
+
+fn ipv4s_from_ip_json() -> Vec<String> {
+    let Ok(out) = std::process::Command::new("ip")
+        .args(["-j", "-4", "addr"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return Vec::new();
+    };
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
+    let mut ips = Vec::new();
+    for iface in arr {
+        let Some(infos) = iface.get("addr_info").and_then(|x| x.as_array()) else {
+            continue;
+        };
+        for info in infos {
+            if info.get("family").and_then(|x| x.as_str()) != Some("inet") {
+                continue;
+            }
+            let Some(local) = info.get("local").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            if !skip_lan_ip(local) {
+                ips.push(local.to_string());
+            }
+        }
+    }
+    ips
+}
+
+fn ipv4s_from_ip_text() -> Vec<String> {
+    let Ok(out) = std::process::Command::new("ip")
+        .args(["-o", "-4", "addr", "show"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            while let Some(tok) = parts.next() {
+                if tok == "inet" {
+                    let addr = parts.next()?.split('/').next()?;
+                    if !skip_lan_ip(addr) {
+                        return Some(addr.to_string());
+                    }
+                    return None;
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+fn ca_fingerprint(cfg: &Config) -> Option<String> {
+    let crt = certs_dir(cfg).join("ca.crt");
+    if !crt.exists() {
+        return None;
+    }
+    let out = util::run_ok(
+        "openssl",
+        &[
+            "x509",
+            "-in",
+            &crt.display().to_string(),
+            "-noout",
+            "-fingerprint",
+            "-sha256",
+        ],
+    )
+    .ok()?;
+    out.trim()
+        .rsplit('=')
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn remove_leaf_files(cfg: &Config, stem: &str) {
+    let (crt, key, fullchain, san) = leaf_paths(cfg, stem);
+    for p in [
+        crt,
+        key,
+        fullchain,
+        san,
+        certs_dir(cfg).join(format!("{stem}.csr")),
+        certs_dir(cfg).join(format!("{stem}.ext")),
+    ] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+pub fn ca_pem(cfg: &Config) -> Result<Vec<u8>, ApiError> {
+    let crt = certs_dir(cfg).join("ca.crt");
+    if !crt.exists() {
+        ensure_ca(cfg)?;
+    }
+    std::fs::read(&crt).map_err(ApiError::internal)
 }
 
 fn acme_certs(hostname: &str) -> Option<(PathBuf, PathBuf)> {
@@ -202,7 +542,7 @@ fn write_nginx(cfg: &Config, state: &ProxyState) -> Result<(), ApiError> {
         location_block(&upstream, true)
     );
     if state.dashboard_tls == "lan" {
-        let (crt, key) = lan_certs(cfg)?;
+        let (crt, key) = issue_leaf(cfg, "dashboard", &dashboard_sans())?;
         dash.push_str(&ssl_listen(
             "_",
             &crt,
@@ -231,7 +571,7 @@ fn write_nginx(cfg: &Config, state: &ProxyState) -> Result<(), ApiError> {
         );
         match host.tls.as_str() {
             "lan" => {
-                let (crt, key) = lan_certs(cfg)?;
+                let (crt, key) = issue_leaf(cfg, &host.id, &host_sans(name))?;
                 body.push_str(&ssl_listen(
                     name,
                     &crt,
@@ -311,12 +651,17 @@ fn issue_acme(cfg: &Config, hostname: &str) -> Result<(), ApiError> {
 pub fn status(cfg: &Config) -> ProxyStatus {
     let state = load_state(cfg);
     let nginx_available = util::which("nginx");
+    let ca_fp = ca_fingerprint(cfg);
     ProxyStatus {
         privileged: privileged(),
         nginx_available,
         certbot_available: util::which("certbot"),
+        openssl_available: util::which("openssl"),
         dashboard_upstream: dashboard_upstream(cfg),
         dashboard_tls: state.dashboard_tls,
+        dashboard_names: dashboard_display_names(),
+        ca_ready: ca_fp.is_some(),
+        ca_fingerprint: ca_fp,
         hosts: state.hosts,
         error: if nginx_available {
             None
@@ -409,6 +754,7 @@ pub fn delete_host(cfg: &Config, id: &str) -> Result<ProxyStatus, ApiError> {
     if state.hosts.len() == before {
         return Err(ApiError::NotFound);
     }
+    remove_leaf_files(cfg, id);
     save_state(cfg, &state)?;
     write_nginx(cfg, &state)?;
     reload_nginx()?;
@@ -420,4 +766,75 @@ pub fn ensure_dirs(cfg: &Config) {
     let _ = std::fs::create_dir_all(dir(cfg).join("acme"));
     let state = load_state(cfg);
     let _ = write_nginx(cfg, &state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_sans_dns_and_ip() {
+        assert_eq!(host_sans("photos.home.arpa"), vec!["DNS:photos.home.arpa"]);
+        assert_eq!(host_sans("192.168.1.20"), vec!["IP:192.168.1.20"]);
+    }
+
+    #[test]
+    fn skip_loopback_and_link_local() {
+        assert!(skip_lan_ip("127.0.0.1"));
+        assert!(skip_lan_ip("169.254.1.1"));
+        assert!(!skip_lan_ip("192.168.1.141"));
+        assert!(!skip_lan_ip("10.0.0.2"));
+    }
+
+    #[test]
+    fn cert_cn_prefers_dns() {
+        assert_eq!(
+            cert_cn(&["DNS:photos.home.arpa".into(), "IP:10.0.0.1".into()]),
+            "photos.home.arpa"
+        );
+        assert_eq!(cert_cn(&["IP:10.0.0.1".into()]), "10.0.0.1");
+    }
+
+    #[test]
+    fn issues_ca_and_per_host_leaf() {
+        if !util::which("openssl") {
+            return;
+        }
+        let tmp = std::env::temp_dir().join(format!(
+            "coduos-ca-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut cfg = Config::for_environment();
+        cfg.data_dir = tmp.clone();
+        let (ca, _) = ensure_ca(&cfg).expect("ca");
+        let pem = std::fs::read_to_string(&ca).unwrap();
+        assert!(pem.contains("BEGIN CERTIFICATE"));
+        let (full, key) = issue_leaf(
+            &cfg,
+            "photos",
+            &["DNS:photos.home.arpa".into()],
+        )
+        .expect("leaf");
+        assert!(full.exists());
+        assert!(key.exists());
+        let text = util::run_ok(
+            "openssl",
+            &[
+                "x509",
+                "-in",
+                &full.display().to_string(),
+                "-noout",
+                "-text",
+            ],
+        )
+        .unwrap();
+        assert!(text.contains("photos.home.arpa"));
+        assert!(text.contains("DNS:photos.home.arpa"));
+        let _ = std::fs::remove_dir_all(tmp);
+    }
 }

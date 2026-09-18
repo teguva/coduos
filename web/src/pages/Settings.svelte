@@ -114,8 +114,6 @@
   let addingRoot = $state(false);
   let applying = $state(false);
   let confirmUpdate = $state(false);
-  let chargeDraft = $state(80);
-  let startDraft = $state(75);
   let display = $state<DisplayOut | null>(null);
   let displayBusy = $state(false);
   let powerConfirm = $state<'reboot' | 'shutdown' | null>(null);
@@ -132,8 +130,6 @@
     update = await api<Update>('/api/update');
     try {
       battery = await api<BatteryPack>('/api/system/battery');
-      if (battery?.limit.limit_pct != null) chargeDraft = battery.limit.limit_pct;
-      if (battery?.limit.start_pct != null) startDraft = battery.limit.start_pct;
     } catch {
       battery = null;
     }
@@ -230,27 +226,16 @@
     location.reload();
   }
 
-  async function setChargeLimit(limit_pct: number, start_pct?: number | null) {
+  async function setChargeLimit(limit_pct: number) {
     if (!battery?.limit.can_set) return;
     error = '';
     notice = '';
-    const dual = battery.limit.kind === 'thresholds';
-    let start = dual ? (start_pct ?? startDraft) : undefined;
-    if (dual && start != null && start >= limit_pct) start = Math.max(0, limit_pct - 1);
     try {
       battery = await api<BatteryPack>('/api/system/battery', {
         method: 'POST',
-        body: JSON.stringify({ limit_pct, start_pct: start })
+        body: JSON.stringify({ limit_pct })
       });
-      if (battery.limit.limit_pct != null) chargeDraft = battery.limit.limit_pct;
-      if (battery.limit.start_pct != null) startDraft = battery.limit.start_pct;
-      if (limit_pct >= 100) {
-        notice = 'Charge limit removed (full).';
-      } else if (battery.limit.start_pct != null) {
-        notice = `Charge ${battery.limit.start_pct}–${limit_pct}%.`;
-      } else {
-        notice = `Charge limit set to ${limit_pct}%.`;
-      }
+      notice = limit_pct >= 100 ? 'Battery will charge to full.' : `Charging stops at ${limit_pct}%.`;
     } catch (err: any) {
       error = err.message;
     }
@@ -370,24 +355,21 @@
         <section class="set-block" id="battery">
           <h3>Battery</h3>
           {#each battery.batteries as b}
-            <div class="mini-card">
-              <div>
-                <strong>{b.name}</strong>
-                <div class="meta">
-                  {joinMeta([
-                    b.capacity_pct != null ? `${b.capacity_pct}%` : null,
-                    batteryLabel(b),
-                    b.health_pct != null ? `health ${b.health_pct}%` : null,
-                    b.cycle_count != null ? `${b.cycle_count} cycles` : null
-                  ])}
-                </div>
-              </div>
-            </div>
+            <p class="meta">
+              {joinMeta([
+                b.name || null,
+                b.capacity_pct != null ? `${b.capacity_pct}%` : null,
+                batteryLabel(b),
+                b.health_pct != null ? `health ${b.health_pct}%` : null,
+                b.cycle_count != null ? `${b.cycle_count} cycles` : null
+              ])}
+            </p>
           {/each}
-          {#if !battery.privileged}
-            <div class="banner">Charge limits need the installed daemon running as root.</div>
-          {/if}
           {#if battery.limit.supported}
+            {#if !battery.privileged}
+              <div class="banner">Changing this needs the installed daemon running as root.</div>
+            {/if}
+            <p class="hint">Stop charging at this level while plugged in. 80% is better if the laptop stays on power.</p>
             <div class="segment">
               {#each battery.limit.presets as p}
                 <button
@@ -400,50 +382,8 @@
                 </button>
               {/each}
             </div>
-            {#if battery.limit.kind === 'thresholds'}
-              <label class="field range">
-                <span>Start charging below {startDraft}%</span>
-                <input
-                  type="range"
-                  min="0"
-                  max={Math.max(0, chargeDraft - 1)}
-                  step="1"
-                  bind:value={startDraft}
-                  disabled={!battery.limit.can_set}
-                  onchange={() => setChargeLimit(chargeDraft, startDraft)}
-                />
-              </label>
-              <label class="field range">
-                <span>Stop charging at {chargeDraft}%</span>
-                <input
-                  type="range"
-                  min={Math.max(battery.limit.min_pct, startDraft + 1)}
-                  max={battery.limit.max_pct}
-                  step="1"
-                  bind:value={chargeDraft}
-                  disabled={!battery.limit.can_set}
-                  onchange={() => setChargeLimit(chargeDraft, startDraft)}
-                />
-              </label>
-            {:else if battery.limit.kind === 'end_only'}
-              <label class="field range">
-                <span>Stop charging at {chargeDraft}%</span>
-                <input
-                  type="range"
-                  min={battery.limit.min_pct}
-                  max={battery.limit.max_pct}
-                  step="1"
-                  bind:value={chargeDraft}
-                  disabled={!battery.limit.can_set}
-                  onchange={() => setChargeLimit(chargeDraft)}
-                />
-              </label>
-            {/if}
-            {#if battery.limit.hint}
-              <p class="hint">{battery.limit.hint}</p>
-            {/if}
           {:else}
-            <p class="hint">This machine has a battery, but no charge limiter in sysfs.</p>
+            <p class="hint">This battery cannot be charge-limited from CoduOS.</p>
           {/if}
         </section>
       {/if}

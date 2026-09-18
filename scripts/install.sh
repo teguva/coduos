@@ -430,10 +430,10 @@ unset local_data data_choice
 echo "Installing packages…"
 base_pkgs=()
 case "${PM}" in
-  apt) base_pkgs+=(curl tar ca-certificates) ;;
-  pacman) base_pkgs+=(curl tar ca-certificates) ;;
-  dnf) base_pkgs+=(curl tar ca-certificates) ;;
-  apk) base_pkgs+=(curl tar ca-certificates) ;;
+  apt) base_pkgs+=(curl tar ca-certificates parted e2fsprogs) ;;
+  pacman) base_pkgs+=(curl tar ca-certificates parted e2fsprogs) ;;
+  dnf) base_pkgs+=(curl tar ca-certificates parted e2fsprogs) ;;
+  apk) base_pkgs+=(curl tar ca-certificates parted e2fsprogs) ;;
 esac
 if [[ ${#base_pkgs[@]} -gt 0 ]]; then
   pkg_install "${base_pkgs[@]}" || true

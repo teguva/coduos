@@ -387,9 +387,9 @@
         {/if}
       </div>
     {/each}
-    {#if canManage(d) && d.partitions.length > 0}
+    {#if canManage(d)}
       <div class="part-actions" style="margin-top:8px">
-        <button class="btn compact danger" disabled={!inv?.privileged || busy === d.path} onclick={() => openFormat(d.path, title(d), title(d))}>Format whole disk</button>
+        <button class="btn compact danger" disabled={!inv?.privileged || busy === d.path} onclick={() => openFormat(d.path, title(d), 'data')}>Format whole disk</button>
       </div>
     {/if}
   </div>
@@ -464,6 +464,11 @@
         </div>
       </div>
     {/each}
+    {#if canManage(d)}
+      <div class="part-actions" style="margin-top:8px">
+        <button class="btn compact danger" disabled={!inv?.privileged || busy === d.path} onclick={() => openFormat(d.path, title(d), 'data')}>Format whole disk</button>
+      </div>
+    {/if}
   </div>
 {/each}
 
@@ -549,7 +554,7 @@
   <div class="confirm-bg" role="presentation" onclick={(e) => { if (e.currentTarget === e.target) formatDlg = null; }}>
     <div class="confirm-card" role="dialog" aria-label="Format drive">
       <h3>Format {formatDlg.title}?</h3>
-      <p class="danger-text">This erases everything on {formatDlg.device}. CoduOS then mounts it at /media/coduos/{folderSlug(fmtLabel || 'data')}.</p>
+      <p class="danger-text">This erases everything on {formatDlg.device}. Whole disks get a new GPT table and one partition. CoduOS then mounts it at /media/coduos/{folderSlug(fmtLabel || 'data')}.</p>
       <label class="field"><span>Filesystem</span>
         <select bind:value={fmtFs}>
           <option value="ext4">ext4 (Linux)</option>

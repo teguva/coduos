@@ -54,6 +54,7 @@ pub struct ChargeLimit {
 #[derive(Debug, Deserialize)]
 pub struct ChargeLimitIn {
     pub limit_pct: u8,
+    #[serde(default)]
     pub start_pct: Option<u8>,
 }
 
@@ -259,7 +260,7 @@ fn read_limit(hw: &Hardware) -> ChargeLimit {
             vec![60, 80, 90, 100],
             50,
             Some(
-                "Charging starts below the lower threshold and stops at the upper one, so a plugged-in laptop does not sit at 100%."
+                "Stops charging at this level while plugged in."
                     .into(),
             ),
         ),
@@ -268,7 +269,7 @@ fn read_limit(hw: &Hardware) -> ChargeLimit {
             vec![80, 100],
             80,
             Some(
-                "This laptop supports a conservation / Long Life hold around 80%, or a full charge."
+                "Stops charging at this level while plugged in."
                     .into(),
             ),
         ),

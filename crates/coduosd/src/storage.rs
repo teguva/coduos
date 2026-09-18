@@ -835,16 +835,125 @@ fn find_disk<'a>(inv: &'a Inventory, device: &str) -> Option<&'a Disk> {
     inv.disks.iter().find(|d| d.path == device || d.name == device)
 }
 
-fn wait_for_dev(path: &str) -> Result<(), ApiError> {
-    for _ in 0..40 {
-        if Path::new(path).exists() {
-            return Ok(());
+fn first_part_from_lsblk(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        let mut it = line.split_whitespace();
+        let path = it.next()?;
+        let kind = it.next().unwrap_or("");
+        (kind == "part" && path.starts_with("/dev/")).then(|| path.to_string())
+    })
+}
+
+fn lsblk_first_part(disk: &str) -> Option<String> {
+    let out = std::process::Command::new("lsblk")
+        .args(["-nr", "-o", "PATH,TYPE", disk])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    first_part_from_lsblk(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn blkid_uuid(dev: &str) -> Option<String> {
+    let out = std::process::Command::new("blkid")
+        .args(["-o", "value", "-s", "UUID", dev])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+fn wait_for_first_partition(disk: &str) -> Result<String, ApiError> {
+    let guessed = partition_node(disk);
+    for _ in 0..80 {
+        if let Some(p) = lsblk_first_part(disk) {
+            if Path::new(&p).exists() {
+                return Ok(p);
+            }
+        }
+        if Path::new(&guessed).exists() {
+            return Ok(guessed);
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     Err(ApiError::BadRequest(format!(
-        "device {path} did not appear after partitioning"
+        "no partition appeared on {disk} after creating a GPT table"
     )))
+}
+
+fn wait_for_uuid(dev: &str) -> Result<String, ApiError> {
+    for _ in 0..50 {
+        if let Some(id) = blkid_uuid(dev) {
+            return Ok(id);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(ApiError::BadRequest(format!(
+        "{dev} has no UUID after formatting"
+    )))
+}
+
+fn wait_until_part_in_inventory(cfg: &Config, path: &str) -> Result<(), ApiError> {
+    for _ in 0..40 {
+        if let Ok(inv) = inventory(cfg) {
+            if find_part(&inv, path).is_some_and(|(_, p)| !p.uuid.is_empty()) {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(ApiError::BadRequest(format!(
+        "{path} did not show up in lsblk with a UUID after formatting"
+    )))
+}
+
+fn prepare_disk_for_partitioning(disk: &Disk) -> Result<(), ApiError> {
+    for p in &disk.partitions {
+        refuse_system(p)?;
+        unmount_if_needed(&p.mountpoint)?;
+        if p.fstype.eq_ignore_ascii_case("swap")
+            || p.mountpoint.to_ascii_uppercase().contains("SWAP")
+        {
+            let _ = util::run("swapoff", &[&p.path]);
+        }
+        let _ = util::run("wipefs", &["-a", &p.path]);
+    }
+    let _ = util::run("wipefs", &["-a", &disk.path]);
+    let _ = util::run("partx", &["-d", &disk.path]);
+    Ok(())
+}
+
+fn partition_whole_disk(disk_path: &str) -> Result<String, ApiError> {
+    if !util::which("parted") {
+        return Err(ApiError::BadRequest(
+            "parted is required to format a whole disk (install the parted package)".into(),
+        ));
+    }
+    util::run_ok(
+        "parted",
+        &["-s", "-a", "optimal", disk_path, "mklabel", "gpt"],
+    )?;
+    util::run_ok(
+        "parted",
+        &[
+            "-s",
+            "-a",
+            "optimal",
+            disk_path,
+            "mkpart",
+            "data",
+            "1MiB",
+            "100%",
+        ],
+    )?;
+    let _ = util::run("partprobe", &[disk_path]);
+    let _ = util::run("partx", &["-u", disk_path]);
+    let _ = util::run("udevadm", &["settle", "-t", "8"]);
+    wait_for_first_partition(disk_path)
 }
 
 fn mkfs(fstype: &str, label: &str, dev: &str) -> Result<(), ApiError> {
@@ -924,32 +1033,25 @@ pub fn format_and_mount(
     let inv = inventory(cfg)?;
     if let Some(disk) = find_disk(&inv, &device) {
         refuse_disk(disk)?;
-        for p in &disk.partitions {
-            refuse_system(p)?;
-            unmount_if_needed(&p.mountpoint)?;
-        }
-        if !util::which("parted") {
-            return Err(ApiError::BadRequest("parted is required to format a disk".into()));
-        }
-        util::run_ok(
-            "parted",
-            &["-s", &disk.path, "--", "mklabel", "gpt", "mkpart", "primary", "1MiB", "100%"],
-        )?;
-        let _ = util::run("partprobe", &[&disk.path]);
-        let _ = util::run("udevadm", &["settle", "-t", "8"]);
-        let part_path = partition_node(&disk.path);
-        wait_for_dev(&part_path)?;
+        let disk_path = disk.path.clone();
+        prepare_disk_for_partitioning(disk)?;
+        let part_path = partition_whole_disk(&disk_path)?;
         mkfs(&fstype, &label, &part_path)?;
+        wait_for_uuid(&part_path)?;
         let _ = util::run("udevadm", &["settle", "-t", "8"]);
+        wait_until_part_in_inventory(cfg, &part_path)?;
         return mount_device(cfg, config_path, &part_path);
     }
     let (disk, part) = find_part(&inv, &device).ok_or(ApiError::NotFound)?;
     refuse_disk(disk)?;
     refuse_system(part)?;
+    let part_path = part.path.clone();
     unmount_if_needed(&part.mountpoint)?;
-    mkfs(&fstype, &label, &part.path)?;
+    mkfs(&fstype, &label, &part_path)?;
+    wait_for_uuid(&part_path)?;
     let _ = util::run("udevadm", &["settle", "-t", "8"]);
-    mount_device(cfg, config_path, &part.path)
+    wait_until_part_in_inventory(cfg, &part_path)?;
+    mount_device(cfg, config_path, &part_path)
 }
 
 fn upsert_storage_mount(cfg: &mut Config, mount: StorageMount) {
@@ -1079,6 +1181,73 @@ mod tests {
         assert_eq!(partition_node("/dev/sdb"), "/dev/sdb1");
         assert_eq!(partition_node("/dev/nvme0n1"), "/dev/nvme0n1p1");
         assert_eq!(partition_node("/dev/mmcblk0"), "/dev/mmcblk0p1");
+    }
+
+    #[test]
+    fn first_part_from_lsblk_skips_disk_row() {
+        let out = "/dev/sdb disk\n/dev/sdb1 part\n";
+        assert_eq!(
+            first_part_from_lsblk(out).as_deref(),
+            Some("/dev/sdb1")
+        );
+        assert_eq!(
+            first_part_from_lsblk("/dev/nvme1n1 disk\n/dev/nvme1n1p1 part\n").as_deref(),
+            Some("/dev/nvme1n1p1")
+        );
+        assert!(first_part_from_lsblk("/dev/sdb disk\n").is_none());
+    }
+
+    #[test]
+    fn parted_creates_gpt_data_partition_on_image() {
+        if !util::which("parted") {
+            return;
+        }
+        let img = std::env::temp_dir().join(format!(
+            "coduos-parted-{}-{}.img",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&img)
+            .unwrap();
+        file.set_len(64 * 1024 * 1024).unwrap();
+        drop(file);
+        let path = img.display().to_string();
+        let mk = util::run_ok(
+            "parted",
+            &["-s", "-a", "optimal", &path, "mklabel", "gpt"],
+        );
+        let part = util::run_ok(
+            "parted",
+            &[
+                "-s",
+                "-a",
+                "optimal",
+                &path,
+                "mkpart",
+                "data",
+                "1MiB",
+                "100%",
+            ],
+        );
+        let print = util::run_ok("parted", &["-s", &path, "print"]).unwrap_or_default();
+        let _ = std::fs::remove_file(&img);
+        mk.expect("mklabel gpt");
+        part.expect("mkpart data");
+        assert!(
+            print.to_ascii_lowercase().contains("gpt"),
+            "expected gpt table, got {print}"
+        );
+        assert!(
+            print.contains("data") || print.contains(" 1 "),
+            "expected a partition, got {print}"
+        );
     }
 
     #[test]
