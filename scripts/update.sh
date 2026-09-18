@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Update an existing CoduOS install from the latest GitHub Release.
 # Replaces the daemon, web UI, and unit files. Keeps config and data.
+# Installs parted and e2fsprogs if missing (needed to format a whole disk).
 # Does not install or change Docker, nginx, or WireGuard.
 #
 #   curl -fsSL https://raw.githubusercontent.com/teguva/coduos/main/scripts/update.sh | sudo bash
@@ -29,9 +30,59 @@ case "${arch}" in
   *) echo "unsupported architecture: ${arch}" >&2; exit 1 ;;
 esac
 
+if command -v apt-get >/dev/null 2>&1; then
+  PM=apt
+elif command -v pacman >/dev/null 2>&1; then
+  PM=pacman
+elif command -v dnf >/dev/null 2>&1; then
+  PM=dnf
+elif command -v apk >/dev/null 2>&1; then
+  PM=apk
+else
+  PM=unknown
+fi
+
+pkg_install() {
+  if [[ $# -eq 0 ]]; then
+    return 0
+  fi
+  case "${PM}" in
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      if [[ "${APT_UPDATED:-0}" -ne 1 ]]; then
+        apt-get update -qq
+        APT_UPDATED=1
+      fi
+      apt-get install -y "$@"
+      ;;
+    pacman)
+      pacman -Sy --noconfirm --needed "$@"
+      ;;
+    dnf)
+      dnf install -y "$@"
+      ;;
+    apk)
+      apk add --no-cache "$@"
+      ;;
+    *)
+      echo "No supported package manager. Install manually: $*" >&2
+      return 1
+      ;;
+  esac
+}
+
 if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
   echo "curl and tar are required" >&2
   exit 1
+fi
+
+echo "Ensuring disk tools…"
+pkg_install parted e2fsprogs || true
+if ! command -v parted >/dev/null 2>&1; then
+  echo "warning: parted is not installed; whole-disk format needs the parted package" >&2
+fi
+if ! command -v mkfs.ext4 >/dev/null 2>&1; then
+  echo "warning: mkfs.ext4 is not installed; formatting needs e2fsprogs" >&2
 fi
 
 before=""

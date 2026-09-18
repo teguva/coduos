@@ -324,6 +324,7 @@ pub async fn apply(
             )?;
         }
         let _ = util::run("systemctl", &["daemon-reload"]);
+        util::ensure_disk_format_tools();
         Ok::<(), ApiError>(())
     }
     .await;

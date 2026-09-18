@@ -442,6 +442,12 @@ if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
   echo "curl and tar are required" >&2
   exit 1
 fi
+if ! command -v parted >/dev/null 2>&1; then
+  echo "warning: parted is not installed; whole-disk format in Storage will not work" >&2
+fi
+if ! command -v mkfs.ext4 >/dev/null 2>&1; then
+  echo "warning: mkfs.ext4 is not installed; formatting needs e2fsprogs" >&2
+fi
 
 if [[ "${WITH_DOCKER}" -eq 1 ]]; then
   case "${PM}" in

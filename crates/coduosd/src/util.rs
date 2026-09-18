@@ -90,3 +90,44 @@ pub fn which(cmd: &str) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+/// Install `parted` and `e2fsprogs` when missing. Used by in-dashboard Update now
+/// so older machines pick up whole-disk format tools without re-running install.sh.
+pub fn ensure_disk_format_tools() {
+    if !privileged() || (which("parted") && which("mkfs.ext4")) {
+        return;
+    }
+    let pkgs = ["parted", "e2fsprogs"];
+    if which("apt-get") {
+        let _ = std::process::Command::new("apt-get")
+            .args(["update", "-qq"])
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .status();
+        let _ = std::process::Command::new("apt-get")
+            .args(["install", "-y"])
+            .args(pkgs)
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .status();
+        return;
+    }
+    if which("pacman") {
+        let _ = std::process::Command::new("pacman")
+            .args(["-Sy", "--noconfirm", "--needed"])
+            .args(pkgs)
+            .status();
+        return;
+    }
+    if which("dnf") {
+        let _ = std::process::Command::new("dnf")
+            .args(["install", "-y"])
+            .args(pkgs)
+            .status();
+        return;
+    }
+    if which("apk") {
+        let _ = std::process::Command::new("apk")
+            .args(["add", "--no-cache"])
+            .args(pkgs)
+            .status();
+    }
+}
