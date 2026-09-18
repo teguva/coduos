@@ -25,6 +25,7 @@ use super::current_user;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/files", get(list))
+        .route("/files/search", get(search))
         .route("/files/mkdir", post(mkdir))
         .route("/files/rename", post(rename))
         .route("/files/copy", post(copy))
@@ -170,6 +171,139 @@ async fn list(
         favorites,
         space,
     }))
+}
+
+const SEARCH_LIMIT: usize = 250;
+const SEARCH_VISIT: usize = 40_000;
+
+#[derive(Debug, Deserialize)]
+struct SearchQuery {
+    pub root: String,
+    #[serde(default)]
+    pub path: String,
+    pub q: String,
+}
+
+#[derive(Serialize)]
+struct SearchOut {
+    root: String,
+    path: String,
+    query: String,
+    entries: Vec<Entry>,
+    truncated: bool,
+}
+
+async fn search(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(q): Query<SearchQuery>,
+) -> Result<Json<SearchOut>, ApiError> {
+    current_user(&state, &jar).await?;
+    let needle = q.q.trim().to_lowercase();
+    if needle.chars().count() < 2 {
+        return Err(ApiError::BadRequest(
+            "type at least 2 characters to search subfolders".into(),
+        ));
+    }
+    let dir = resolve(&state, &q.root, &q.path).await?;
+    if !dir.is_dir() {
+        return Err(ApiError::BadRequest("not a directory".into()));
+    }
+    let start_rel = q.path.trim_end_matches('/').to_string();
+    let needle_out = needle.clone();
+    let (entries, truncated) = tokio::task::spawn_blocking(move || {
+        search_tree(&dir, &start_rel, &needle, SEARCH_LIMIT, SEARCH_VISIT)
+    })
+    .await
+    .map_err(|e| ApiError::internal(e))?;
+    Ok(Json(SearchOut {
+        root: q.root,
+        path: q.path,
+        query: needle_out,
+        entries,
+        truncated,
+    }))
+}
+
+fn skip_search_dir(name: &str) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "node_modules" | "__pycache__" | "lost+found"
+    )
+}
+
+fn search_tree(
+    start: &Path,
+    start_rel: &str,
+    needle: &str,
+    limit: usize,
+    visit_cap: usize,
+) -> (Vec<Entry>, bool) {
+    let mut out = Vec::new();
+    let mut visits = 0usize;
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((start.to_path_buf(), start_rel.to_string()));
+    while let Some((dir, rel)) = queue.pop_front() {
+        if out.len() >= limit || visits >= visit_cap {
+            break;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for ent in rd {
+            if visits >= visit_cap || out.len() >= limit {
+                break;
+            }
+            visits += 1;
+            let Ok(ent) = ent else { continue };
+            let name = ent.file_name().to_string_lossy().into_owned();
+            if name == "." || name == ".." {
+                continue;
+            }
+            let Ok(meta) = ent.metadata() else { continue };
+            let child_rel = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            let is_dir = meta.is_dir();
+            let is_link = meta.file_type().is_symlink();
+            if name.to_lowercase().contains(needle) {
+                out.push(file_entry(name.clone(), child_rel.clone(), &meta));
+            }
+            if is_dir && !is_link && !skip_search_dir(&name) {
+                queue.push_back((ent.path(), child_rel));
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        b.dir
+            .cmp(&a.dir)
+            .then(a.path.to_lowercase().cmp(&b.path.to_lowercase()))
+    });
+    let truncated = out.len() >= limit || visits >= visit_cap;
+    if out.len() > limit {
+        out.truncate(limit);
+    }
+    (out, truncated)
+}
+
+fn file_entry(name: String, rel: String, meta: &std::fs::Metadata) -> Entry {
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+    Entry {
+        name,
+        path: rel,
+        dir: meta.is_dir(),
+        size: meta.len(),
+        modified,
+    }
 }
 
 fn disk_space(path: &std::path::Path) -> Option<SpaceOut> {
@@ -524,5 +658,71 @@ mod tests {
         let open = HeaderValue::from_static("bytes=8-");
         assert_eq!(parse_byte_range(Some(&open), 10).unwrap(), Some((8, 9)));
         assert_eq!(parse_byte_range(None, 10).unwrap(), None);
+    }
+
+    #[test]
+    fn search_tree_finds_nested_file_and_folder() {
+        let dir = std::env::temp_dir().join(format!(
+            "coduos-search-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join("photos/2024")).unwrap();
+        fs::write(dir.join("photos/2024/beach.jpg"), b"a").unwrap();
+        fs::write(dir.join("readme.txt"), b"b").unwrap();
+        fs::create_dir_all(dir.join("photos/library")).unwrap();
+        let (hits, truncated) = search_tree(&dir, "", "beach", 50, 1000);
+        let (folders, _) = search_tree(&dir, "", "libr", 50, 1000);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!truncated);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "photos/2024/beach.jpg");
+        assert!(!hits[0].dir);
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].path, "photos/library");
+        assert!(folders[0].dir);
+    }
+
+    #[test]
+    fn search_tree_from_subdir_stays_scoped() {
+        let dir = std::env::temp_dir().join(format!(
+            "coduos-search-scope-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join("keep/nested")).unwrap();
+        fs::create_dir_all(dir.join("skip")).unwrap();
+        fs::write(dir.join("keep/nested/note.txt"), b"a").unwrap();
+        fs::write(dir.join("skip/note.txt"), b"b").unwrap();
+        let (hits, _) = search_tree(&dir.join("keep"), "keep", "note", 50, 1000);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "keep/nested/note.txt");
+    }
+
+    #[test]
+    fn search_tree_skips_node_modules() {
+        let dir = std::env::temp_dir().join(format!(
+            "coduos-search-skip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        fs::write(dir.join("node_modules/pkg/hit.txt"), b"a").unwrap();
+        fs::create_dir_all(dir.join("photos")).unwrap();
+        fs::write(dir.join("photos/hit.txt"), b"b").unwrap();
+        let (hits, _) = search_tree(&dir, "", "hit", 50, 1000);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "photos/hit.txt");
     }
 }

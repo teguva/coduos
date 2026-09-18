@@ -1,5 +1,6 @@
 <script lang="ts">
   import { bytes, shortDate, when } from '../lib/format';
+  import { parentRel } from '../lib/filePath';
   import { fileIcon } from '../lib/icons';
   import type { FileEntry, FilePane } from '../lib/filePane';
   import Icon from './Icon.svelte';
@@ -54,11 +55,13 @@
   }>();
 
   let filtered = $derived.by(() => {
+    if (pane.hits) return pane.hits;
     const q = pane.query.trim().toLowerCase();
     const ents = pane.list?.entries ?? [];
     if (!q) return ents;
     return ents.filter((e) => e.name.toLowerCase().includes(q));
   });
+  const deepSearch = $derived(pane.hits != null);
 
   function crumbs() {
     const parts = pane.path.split('/').filter(Boolean);
@@ -122,7 +125,15 @@
           ondrop={(e) => onDropAt(e, pane.root, c.path)}
         >{c.label}</button>
       {/each}
-      <span class="chip muted">{filtered.length} {filtered.length === 1 ? 'item' : 'items'}</span>
+      <span class="chip muted">
+        {#if pane.searching}
+          Searching…
+        {:else if deepSearch}
+          {filtered.length} match{filtered.length === 1 ? '' : 'es'}{#if pane.truncated}+{/if}
+        {:else}
+          {filtered.length} {filtered.length === 1 ? 'item' : 'items'}
+        {/if}
+      </span>
     </div>
     {#if canClose && onClosePane}
       <button
@@ -157,8 +168,12 @@
         <div>
           {#if !pane.list && !pane.error}
             Loading…
+          {:else if pane.searching}
+            Searching this folder and subfolders…
+          {:else if pane.query && pane.truncated}
+            Search stopped after scanning too many items. Open a more specific folder and try again.
           {:else if pane.query}
-            No matching items.
+            No matching files or folders.
           {:else}
             This folder is empty. Drop files here or create a folder.
           {/if}
@@ -202,7 +217,13 @@
           >
             <Icon name={fileIcon(ent.name, ent.dir)} size={52} class="tile-img" alt="" />
             <div class="label">{ent.name}</div>
-            <div class="meta">{shortDate(ent.modified)}</div>
+            <div class="meta">
+              {#if deepSearch}
+                {parentRel(ent.path) || 'This folder'}
+              {:else}
+                {shortDate(ent.modified)}
+              {/if}
+            </div>
           </button>
         {/each}
       </div>
@@ -246,7 +267,12 @@
               <td>
                 <span class="file-name">
                   <Icon name={fileIcon(ent.name, ent.dir)} size={22} alt="" />
-                  {ent.name}
+                  <span>
+                    {ent.name}
+                    {#if deepSearch && parentRel(ent.path)}
+                      <div class="meta">{parentRel(ent.path)}</div>
+                    {/if}
+                  </span>
                 </span>
               </td>
               <td>{ent.dir ? '—' : bytes(ent.size)}</td>
@@ -259,7 +285,9 @@
   </div>
   <footer class="files-foot">
     <span class="clip">{pathLabel()}</span>
-    {#if pane.selected.size}
+    {#if pane.truncated}
+      <span class="meta">Showing the first {filtered.length} matches</span>
+    {:else if pane.selected.size}
       <span class="meta">{pane.selected.size} selected</span>
     {:else if hint}
       <span class="meta">{hint}</span>

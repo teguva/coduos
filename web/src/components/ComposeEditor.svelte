@@ -1,10 +1,13 @@
 <script lang="ts">
-  import { resolveVolumeHost, type EnvRow, type ServiceForm } from '../lib/compose';
+  import type { BrowsePath } from '../lib/filePath';
+  import { interpolationPointer, resolveVolumeHost, type EnvRow, type ServiceForm } from '../lib/compose';
+  import UiIcon from './UiIcon.svelte';
 
-  let { service = $bindable(), appDir = '', env = [] } = $props<{
+  let { service = $bindable(), appDir = '', env = [], onBrowse } = $props<{
     service: ServiceForm;
     appDir?: string;
     env?: EnvRow[];
+    onBrowse?: BrowsePath;
   }>();
 
   const extraKeys = $derived(Object.keys(service.extra).sort());
@@ -20,6 +23,20 @@
   }
   function drop<T>(list: T[], i: number): T[] {
     return list.filter((_, n) => n !== i);
+  }
+
+  function browseHost(host: string, setHost: (path: string) => void) {
+    if (!onBrowse) return;
+    const key = interpolationPointer(host);
+    if (key) {
+      const row = env.find((e) => e.key.trim() === key);
+      onBrowse(row?.value || '', (p) => {
+        if (row) row.value = p;
+        else setHost(p);
+      });
+      return;
+    }
+    onBrowse(host, setHost);
   }
 </script>
 
@@ -72,7 +89,19 @@
       {@const hostHint = resolveVolumeHost(appDir, v.host, env)}
       <div class="vol-item">
         <div class="kv-row two">
-          <input bind:value={v.host} placeholder="/DATA/Media" />
+          <div class="path-input">
+            <input bind:value={v.host} placeholder="/DATA/Media" />
+            {#if onBrowse}
+              <button
+                type="button"
+                class="btn secondary icon-only compact"
+                title="Browse Files"
+                onclick={() => browseHost(v.host, (p) => (v.host = p))}
+              >
+                <UiIcon name="folder_open" size={18} />
+              </button>
+            {/if}
+          </div>
           <input bind:value={v.container} placeholder="/Media" />
           <button type="button" class="close-x" onclick={() => (service.volumes = drop(service.volumes, i))}>×</button>
         </div>

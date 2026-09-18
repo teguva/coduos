@@ -18,6 +18,9 @@ export type FilePane = {
     space?: { used: number; total: number } | null;
   } | null;
   query: string;
+  hits: FileEntry[] | null;
+  searching: boolean;
+  truncated: boolean;
   selected: Set<string>;
   lastClicked: string | null;
   error: string;

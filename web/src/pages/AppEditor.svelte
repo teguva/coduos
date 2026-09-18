@@ -31,6 +31,7 @@
   import ComposeEnv from '../components/ComposeEnv.svelte';
   import Confirm from '../components/Confirm.svelte';
   import InfoTip from '../components/InfoTip.svelte';
+  import PathPicker from '../components/PathPicker.svelte';
   import ProgressStrip from '../components/ProgressStrip.svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import UiIcon from '../components/UiIcon.svelte';
@@ -50,7 +51,9 @@
   let notice = $state('');
   let busy = $state('');
   let importEl: HTMLInputElement | undefined;
+  let yamlEl: HTMLTextAreaElement | undefined;
   let pendingImport = $state<{ name: string; text: string }[] | null>(null);
+  let pathPick = $state<{ start: string; onPick: (path: string) => void } | null>(null);
   let needsUpdate = $state(false);
   let status = $state<AppStatus>({
     running: false,
@@ -155,6 +158,31 @@
 
   function suggestedId() {
     return slug(stack.title);
+  }
+
+  function browsePath(start: string, pick: (path: string) => void) {
+    pathPick = { start, onPick: pick };
+  }
+
+  function browseYamlPath() {
+    const el = yamlEl;
+    let from = yaml.length;
+    let to = yaml.length;
+    let start = '';
+    if (el) {
+      from = el.selectionStart ?? yaml.length;
+      to = el.selectionEnd ?? from;
+      const sel = yaml.slice(from, to).trim();
+      if (sel.startsWith('/') || sel.startsWith('./')) start = sel;
+    }
+    browsePath(start, (p) => {
+      yaml = yaml.slice(0, from) + p + yaml.slice(to);
+      requestAnimationFrame(() => {
+        yamlEl?.focus();
+        const pos = from + p.length;
+        yamlEl?.setSelectionRange(pos, pos);
+      });
+    });
   }
 
   function fileBase() {
@@ -543,16 +571,23 @@
         <div class="svc-body">
           {#key tab}
             {#if svc}
-              <ComposeEditor bind:service={stack.services[tab]} {appDir} env={stack.dotEnv} />
+              <ComposeEditor bind:service={stack.services[tab]} {appDir} env={stack.dotEnv} onBrowse={browsePath} />
             {/if}
           {/key}
         </div>
       </div>
     {:else}
-      <ComposeEnv bind:stack {appDir} fileBase={fileBase()} />
+      <ComposeEnv bind:stack {appDir} fileBase={fileBase()} onBrowse={browsePath} />
     {/if}
   {:else}
-    <label class="field"><span>compose.yml</span><textarea class="yaml-editor" bind:value={yaml} required></textarea></label>
+    <div class="field">
+      <span class="field-head">compose.yml
+        <button type="button" class="btn secondary compact" onclick={browseYamlPath}>
+          <UiIcon name="folder_open" size={18} /> Browse path
+        </button>
+      </span>
+      <textarea class="yaml-editor" bind:this={yamlEl} bind:value={yaml} required></textarea>
+    </div>
   {/if}
   <div class="row">
     <button class="btn" disabled={!!busy || jobBusy}>{id ? 'Save' : 'Install'}</button>
@@ -577,6 +612,17 @@
 {/if}
 </AppWindow>
 
+{#if pathPick}
+  <PathPicker
+    start={pathPick.start}
+    title="Choose path"
+    onPick={(p) => {
+      pathPick?.onPick(p);
+      pathPick = null;
+    }}
+    onClose={() => (pathPick = null)}
+  />
+{/if}
 {#if pendingImport}
   <Confirm
     title="Replace compose YAML?"

@@ -9,12 +9,14 @@
     showServiceEnv,
     type StackForm
   } from '../lib/compose';
+  import type { BrowsePath } from '../lib/filePath';
   import UiIcon from './UiIcon.svelte';
 
-  let { stack = $bindable(), appDir = '', fileBase = 'app' } = $props<{
+  let { stack = $bindable(), appDir = '', fileBase = 'app', onBrowse } = $props<{
     stack: StackForm;
     appDir?: string;
     fileBase?: string;
+    onBrowse?: BrowsePath;
   }>();
 
   let query = $state('');
@@ -195,7 +197,7 @@
 
 <p class="hint">
   {#if namedShared === 0 && namedSvc === 0}
-    Shared variables fill the image version and host folders. Import a .env (Immich includes one) or add a variable.
+    Shared variables fill the image version and host folders. Import a .env (Immich includes one) or add a variable. Use Browse to pick a folder from Files.
   {:else}
     {namedShared + namedSvc} variable{namedShared + namedSvc === 1 ? '' : 's'} — image tags, upload folders, and container settings.
   {/if}
@@ -225,7 +227,19 @@
             {/each}
           </select>
           <input bind:value={stack.dotEnv[ei].key} placeholder="UPLOAD_LOCATION" spellcheck="false" />
-          <input bind:value={stack.dotEnv[ei].value} placeholder="value" spellcheck="false" />
+          <div class="path-input">
+            <input bind:value={stack.dotEnv[ei].value} placeholder="value" spellcheck="false" />
+            {#if onBrowse}
+              <button
+                type="button"
+                class="btn secondary icon-only compact"
+                title="Browse Files"
+                onclick={() => onBrowse(stack.dotEnv[ei].value, (p) => (stack.dotEnv[ei].value = p))}
+              >
+                <UiIcon name="folder_open" size={18} />
+              </button>
+            {/if}
+          </div>
           <button type="button" class="close-x" title="Remove" onclick={() => dropShared(ei)}>
             <UiIcon name="close" size={16} />
           </button>
@@ -259,7 +273,20 @@
               {/each}
             </select>
             <input bind:value={stack.services[si].env[ei].key} placeholder="POSTGRES_INITDB_ARGS" spellcheck="false" />
-            <input bind:value={stack.services[si].env[ei].value} placeholder="value" spellcheck="false" />
+            <div class="path-input">
+              <input bind:value={stack.services[si].env[ei].value} placeholder="value" spellcheck="false" />
+              {#if onBrowse}
+                <button
+                  type="button"
+                  class="btn secondary icon-only compact"
+                  title="Browse Files"
+                  onclick={() =>
+                    onBrowse(stack.services[si].env[ei].value, (p) => (stack.services[si].env[ei].value = p))}
+                >
+                  <UiIcon name="folder_open" size={18} />
+                </button>
+              {/if}
+            </div>
             <button type="button" class="close-x" title="Remove" onclick={() => dropSvc(si, ei)}>
               <UiIcon name="close" size={16} />
             </button>

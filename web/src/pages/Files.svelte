@@ -43,6 +43,9 @@
       path,
       list: null,
       query: '',
+      hits: null,
+      searching: false,
+      truncated: false,
       selected: new Set(),
       lastClicked: null,
       error: ''
@@ -73,7 +76,9 @@
 
   let tab = $derived(tabs[tabI] ?? tabs[0]);
   let pane = $derived(tab.panes[tab.activePane] ?? tab.panes[0]);
-  let selectedEntries = $derived((pane.list?.entries ?? []).filter((e) => pane.selected.has(e.path)));
+  let selectedEntries = $derived(visibleEntries(pane).filter((e) => pane.selected.has(e.path)));
+  const searchTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const searchSeq = new Map<string, number>();
 
   function paneTitle(p: FilePane) {
     const parts = p.path.split('/').filter(Boolean);
@@ -87,7 +92,13 @@
   }
 
   async function loadPane(target: FilePane, nextRoot = target.root, nextPath = target.path) {
-    if (nextRoot !== target.root || nextPath !== target.path) target.query = '';
+    const moved = nextRoot !== target.root || nextPath !== target.path;
+    if (moved) {
+      target.query = '';
+      target.hits = null;
+      target.searching = false;
+      target.truncated = false;
+    }
     try {
       const q = new URLSearchParams();
       if (nextRoot) q.set('root', nextRoot);
@@ -100,14 +111,80 @@
       if (data.roots) roots = data.roots;
       favorites = data.favorites ?? favorites;
       const keep = new Set((data.entries ?? []).map((e) => e.path));
-      target.selected = new Set([...target.selected].filter((p) => keep.has(p)));
+      target.selected = new Set([...target.selected].filter((p) => keep.has(p) || (target.hits ?? []).some((e) => e.path === p)));
       if (!data.root && data.roots[0]) {
         await loadPane(target, data.roots[0].id, '');
+        return;
       }
       error = '';
+      if (!moved && target.query.trim().length >= 2) {
+        await runSearch(target);
+      }
     } catch (e: any) {
       target.error = e.message;
       error = e.message;
+    }
+  }
+
+  function visibleEntries(p: FilePane): Entry[] {
+    if (p.hits) return p.hits;
+    const q = p.query.trim().toLowerCase();
+    const ents = p.list?.entries ?? [];
+    if (!q) return ents;
+    return ents.filter((e) => e.name.toLowerCase().includes(q));
+  }
+
+  function onSearchInput(value: string) {
+    const p = currentPane();
+    p.query = value;
+    scheduleSearch(p);
+  }
+
+  function scheduleSearch(p: FilePane) {
+    const prev = searchTimers.get(p.id);
+    if (prev) clearTimeout(prev);
+    const q = p.query.trim();
+    if (q.length < 2) {
+      p.hits = null;
+      p.searching = false;
+      p.truncated = false;
+      return;
+    }
+    p.searching = true;
+    searchTimers.set(
+      p.id,
+      setTimeout(() => {
+        searchTimers.delete(p.id);
+        runSearch(p);
+      }, 280)
+    );
+  }
+
+  async function runSearch(p: FilePane) {
+    const q = p.query.trim();
+    if (q.length < 2 || !p.root) {
+      p.hits = null;
+      p.searching = false;
+      p.truncated = false;
+      return;
+    }
+    const seq = (searchSeq.get(p.id) ?? 0) + 1;
+    searchSeq.set(p.id, seq);
+    p.searching = true;
+    try {
+      const params = new URLSearchParams({ root: p.root, path: p.path, q });
+      const data = await api<{ entries: Entry[]; truncated: boolean }>('/api/files/search?' + params.toString());
+      if (searchSeq.get(p.id) !== seq) return;
+      p.hits = data.entries;
+      p.truncated = data.truncated;
+      p.error = '';
+    } catch (e: any) {
+      if (searchSeq.get(p.id) !== seq) return;
+      p.error = e.message;
+      p.hits = [];
+      p.truncated = false;
+    } finally {
+      if (searchSeq.get(p.id) === seq) p.searching = false;
     }
   }
 
@@ -243,8 +320,7 @@
       if (cmd && ev.key.toLowerCase() === 'a') {
         ev.preventDefault();
         const p = currentPane();
-        const qstr = p.query.trim().toLowerCase();
-        const ents = (p.list?.entries ?? []).filter((e) => !qstr || e.name.toLowerCase().includes(qstr));
+        const ents = visibleEntries(p);
         p.selected = new Set(ents.map((e) => e.path));
       } else if (cmd && ev.key.toLowerCase() === 'c') {
         ev.preventDefault();
@@ -275,6 +351,7 @@
       window.removeEventListener('click', hide);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('resize', onResize);
+      for (const t of searchTimers.values()) clearTimeout(t);
     };
   });
 
@@ -298,8 +375,7 @@
       return;
     }
     if (ev.shiftKey && p.lastClicked) {
-      const qstr = p.query.trim().toLowerCase();
-      const items = (p.list?.entries ?? []).filter((e) => !qstr || e.name.toLowerCase().includes(qstr));
+      const items = visibleEntries(p);
       const a = items.findIndex((e) => e.path === p.lastClicked);
       const b = items.findIndex((e) => e.path === ent.path);
       if (a >= 0 && b >= 0) {
@@ -600,9 +676,9 @@
         <input
           bind:this={searchEl}
           value={pane.query}
-          oninput={(e) => (currentPane().query = e.currentTarget.value)}
-          placeholder="Search"
-          aria-label="Search this folder"
+          oninput={(e) => onSearchInput(e.currentTarget.value)}
+          placeholder="Search this folder and subfolders"
+          aria-label="Search this folder and subfolders"
         />
         <kbd>Ctrl+K</kbd>
       </label>
