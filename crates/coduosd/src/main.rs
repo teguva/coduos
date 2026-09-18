@@ -8,6 +8,7 @@ mod docker;
 mod error;
 mod github;
 mod jail;
+mod kernel;
 mod packages;
 mod proxy;
 mod routes;
@@ -67,6 +68,7 @@ async fn main() -> Result<()> {
     docker::migrate_legacy_app_dirs(&cfg.legacy_apps_dir(), &apps_dir);
     battery::apply_persisted(&cfg);
     display::apply_persisted(&cfg);
+    kernel::apply_persisted(&cfg);
 
     if !config_path.exists() {
         if let Err(err) = cfg.save(&config_path) {

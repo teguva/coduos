@@ -544,6 +544,7 @@ pub async fn compose(
         return Err(ApiError::NotFound);
     }
     let dir = file.parent().unwrap_or(apps_dir);
+    compose_required()?;
     let mut cmd = Command::new("docker");
     cmd.current_dir(dir)
         .arg("compose")
@@ -678,21 +679,32 @@ pub async fn images_present(apps_dir: &Path, id: &str) -> bool {
     true
 }
 
-fn compose_help_has_progress(stdout: &[u8], stderr: &[u8]) -> bool {
-    let out = String::from_utf8_lossy(stdout);
-    let err = String::from_utf8_lossy(stderr);
-    out.contains("--progress") || err.contains("--progress")
+fn compose_plugin_ok() -> bool {
+    static OK: OnceLock<()> = OnceLock::new();
+    if OK.get().is_some() {
+        return true;
+    }
+    let ok = std::process::Command::new("docker")
+        .args(["compose", "version"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        let _ = OK.set(());
+    }
+    ok
 }
 
-fn compose_supports_progress() -> bool {
-    static OK: OnceLock<bool> = OnceLock::new();
-    *OK.get_or_init(|| {
-        std::process::Command::new("docker")
-            .args(["compose", "--help"])
-            .output()
-            .ok()
-            .is_some_and(|o| compose_help_has_progress(&o.stdout, &o.stderr))
-    })
+pub fn compose_required() -> Result<(), ApiError> {
+    if compose_plugin_ok() {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest(
+            "Docker Compose v2 is not installed. In Settings → Updates, install missing packages (docker-compose-v2).".into(),
+        ))
+    }
 }
 
 pub async fn compose_stream<F>(
@@ -709,12 +721,13 @@ where
         return Err(ApiError::NotFound);
     }
     let dir = file.parent().unwrap_or(apps_dir);
+    compose_required()?;
     let mut cmd = Command::new("docker");
-    cmd.current_dir(dir).arg("compose");
-    if compose_supports_progress() {
-        cmd.arg("--progress").arg("json");
-    }
-    cmd.arg("--project-directory")
+    cmd.current_dir(dir)
+        .arg("compose")
+        .arg("--progress")
+        .arg("json")
+        .arg("--project-directory")
         .arg(dir)
         .arg("-f")
         .arg(&file)
@@ -859,19 +872,6 @@ mod tests {
         assert!(p.message.contains("postgres"));
         p.ingest(r#"{"status":"Working","text":"Pulling","percent":42}"#);
         assert_eq!(p.percent(), Some(42));
-    }
-
-    #[test]
-    fn compose_help_detects_progress_flag() {
-        assert!(compose_help_has_progress(
-            b"Usage: docker compose [OPTIONS]\n  --progress string   Progress output",
-            b""
-        ));
-        assert!(compose_help_has_progress(b"", b"--progress string"));
-        assert!(!compose_help_has_progress(
-            b"Usage: docker compose [OPTIONS]\n  --project-name string",
-            b""
-        ));
     }
 
     #[test]

@@ -1548,6 +1548,11 @@ details.advanced[open] > summary::before { content: "▾ "; }
 .set-pane .field { max-width: 420px; }
 .set-block { margin-bottom: 28px; }
 .set-block h3 { margin: 0 0 10px; font-size: 15px; }
+.set-pane details.advanced.set-block > summary {
+  font-size: 15px;
+  color: var(--text);
+  margin-bottom: 10px;
+}
 .segment { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 12px; }
 .card-list { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 12px; }
 .mini-card {

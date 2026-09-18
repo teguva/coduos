@@ -92,13 +92,12 @@ fn require_idle(state: &AppState, id: &str) -> Result<(), ApiError> {
 }
 
 fn require_docker() -> Result<(), ApiError> {
-    if docker::docker_available() {
-        Ok(())
-    } else {
-        Err(ApiError::BadRequest(
+    if !docker::docker_available() {
+        return Err(ApiError::BadRequest(
             "Docker is not available on this host".into(),
-        ))
+        ));
     }
+    docker::compose_required()
 }
 
 async fn list(State(state): State<AppState>, jar: CookieJar) -> Result<Json<Vec<AppOut>>, ApiError> {

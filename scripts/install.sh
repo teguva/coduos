@@ -552,6 +552,17 @@ systemctl daemon-reload
 
 if [[ "${WITH_DOCKER}" -eq 1 ]]; then
   systemctl enable --now docker.service 2>/dev/null || systemctl enable --now docker 2>/dev/null || true
+  if grep -Eq '^[[:space:]]*memory_overcommit[[:space:]]*=[[:space:]]*false' /etc/coduos/coduos.toml 2>/dev/null; then
+    rm -f /etc/sysctl.d/99-coduos-memory.conf
+    sysctl -w vm.overcommit_memory=0 >/dev/null 2>&1 || true
+  elif [[ -d /etc/sysctl.d || -d /etc ]]; then
+    install -d /etc/sysctl.d
+    cat >/etc/sysctl.d/99-coduos-memory.conf <<'EOF'
+# Managed by CoduOS for Redis/Valkey (Immich) and similar Docker apps.
+vm.overcommit_memory = 1
+EOF
+    sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1 || true
+  fi
 fi
 
 if [[ "${WITH_NGINX}" -eq 1 ]]; then

@@ -92,6 +92,12 @@
     hint: string;
     lid_hint: string;
   };
+  type KernelOut = {
+    privileged: boolean;
+    memory_overcommit: boolean;
+    applied: boolean;
+    hint: string;
+  };
 
   const nav = [
     { id: 'general', label: 'General', icon: 'settings' },
@@ -121,6 +127,8 @@
   let pkgBusy = $state(false);
   let display = $state<DisplayOut | null>(null);
   let displayBusy = $state(false);
+  let kernel = $state<KernelOut | null>(null);
+  let kernelBusy = $state(false);
   let powerConfirm = $state<'reboot' | 'shutdown' | null>(null);
   let powerBusy = $state('');
 
@@ -162,6 +170,11 @@
       display = await api<DisplayOut>('/api/system/display');
     } catch {
       display = null;
+    }
+    try {
+      kernel = await api<KernelOut>('/api/system/kernel');
+    } catch {
+      kernel = null;
     }
   }
 
@@ -296,6 +309,25 @@
       { ignore_lid: ignore },
       ignore ? 'Lid close is ignored.' : 'Lid close uses the system default.'
     );
+  }
+
+  async function setMemoryOvercommit(enabled: boolean) {
+    error = '';
+    notice = '';
+    kernelBusy = true;
+    try {
+      kernel = await api<KernelOut>('/api/system/kernel', {
+        method: 'POST',
+        body: JSON.stringify({ memory_overcommit: enabled })
+      });
+      notice = enabled
+        ? 'Memory overcommit is on (Redis/Valkey).'
+        : 'Memory overcommit is off (Linux default).';
+    } catch (err: any) {
+      error = err.message;
+    } finally {
+      kernelBusy = false;
+    }
   }
 
   async function applyUpdate() {
@@ -483,6 +515,28 @@
             <p class="hint">{display.lid_hint}</p>
           {/if}
         </section>
+      {/if}
+
+      {#if kernel}
+        <details class="set-block advanced">
+          <summary>Advanced</summary>
+          {#if !kernel.privileged}
+            <div class="banner">Changing this needs the installed daemon running as root.</div>
+          {/if}
+          <label class="toggle-row">
+            <span>Allow memory overcommit</span>
+            <input
+              type="checkbox"
+              checked={kernel.memory_overcommit}
+              disabled={!kernel.privileged || kernelBusy}
+              onchange={(e) => setMemoryOvercommit(e.currentTarget.checked)}
+            />
+          </label>
+          <p class="hint">{kernel.hint}</p>
+          {#if kernel.privileged && kernel.memory_overcommit && !kernel.applied}
+            <p class="hint">Saved on, but the kernel has not applied it yet.</p>
+          {/if}
+        </details>
       {/if}
 
       <section class="set-block">

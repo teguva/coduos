@@ -34,6 +34,9 @@ pub struct Config {
     /// Ignore lid close (do not suspend / power off).
     #[serde(default, skip_serializing_if = "is_false")]
     pub ignore_lid: bool,
+    /// `vm.overcommit_memory=1` for Redis/Valkey (Immich) and similar Docker apps.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub memory_overcommit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -170,6 +173,7 @@ impl Config {
             battery: BatteryConfig::default(),
             display_off: false,
             ignore_lid: false,
+            memory_overcommit: true,
         };
         if !running_as_root() {
             cfg.bind = "127.0.0.1:13209".into();
@@ -340,6 +344,23 @@ pub fn slugify(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_overcommit_defaults_on() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.memory_overcommit);
+        let off: Config = toml::from_str("memory_overcommit = false\n").unwrap();
+        assert!(!off.memory_overcommit);
+        let raw = toml::to_string_pretty(&Config {
+            memory_overcommit: true,
+            ..Config::for_environment()
+        })
+        .unwrap();
+        assert!(
+            !raw.contains("memory_overcommit"),
+            "default on should omit the field: {raw}"
+        );
+    }
 
     #[test]
     fn apps_dir_uses_data_appdata_when_volume_exists() {
