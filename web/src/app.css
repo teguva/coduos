@@ -666,11 +666,22 @@ pre.logs {
   margin-top: 4px;
   min-height: 22px;
   cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
 }
 .desk-app-status .status-pill {
   font-size: 11px;
   justify-content: center;
   max-width: 100%;
+}
+.update-chip {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
 }
 .desk-app .tile-img {
   display: block;

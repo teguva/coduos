@@ -5,6 +5,7 @@
     errorTip,
     isBusy,
     isLaunchable,
+    mergeStatus,
     overlayJob,
     subscribeAppJobs,
     type AppJob,
@@ -55,6 +56,8 @@
   let pendingImport = $state<{ name: string; text: string }[] | null>(null);
   let pathPick = $state<{ start: string; onPick: (path: string) => void } | null>(null);
   let needsUpdate = $state(false);
+  let imageUpdate = $state<{ available: boolean; images?: string[] } | null>(null);
+  let jobs = $state<Record<string, AppJob>>({});
   let status = $state<AppStatus>({
     running: false,
     installed: false,
@@ -71,6 +74,7 @@
     if (status.phase === 'not_installed') return 'install' as const;
     if (status.phase === 'error') return status.installed ? ('start' as const) : ('install' as const);
     if (status.phase === 'stopped') return 'start' as const;
+    if (imageUpdate?.available && status.installed) return 'update' as const;
     return null;
   });
   const primaryLabel = $derived(
@@ -133,7 +137,7 @@
     else if (tab > i) tab -= 1;
   }
 
-  function applyApp(app: AppRecord, jobs: Record<string, AppJob>) {
+  function applyApp(app: AppRecord) {
     yaml = app.compose_yaml || yaml;
     stack = yamlToStack(yaml);
     if (!stack.title) stack.title = app.name;
@@ -141,19 +145,21 @@
     if (app.web_port && !stack.webPort) stack.webPort = String(app.web_port);
     appId = app.id;
     if (app.app_dir) appDir = app.app_dir;
-    status = overlayJob(app.status, jobs[app.id]);
+    imageUpdate = app.image_update ?? null;
+    status = mergeStatus(app.status, jobs[app.id]);
   }
 
-  async function loadApp(jobs: Record<string, AppJob>) {
+  async function loadApp() {
     if (!id) return;
     const app = await api<AppRecord>('/api/apps/' + id);
-    applyApp(app, jobs);
+    applyApp(app);
   }
 
-  async function refreshStatus(jobs: Record<string, AppJob>) {
+  async function refreshStatus() {
     if (!id) return;
     const app = await api<AppRecord>('/api/apps/' + id);
-    status = overlayJob(app.status, jobs[app.id]);
+    status = mergeStatus(app.status, jobs[app.id]);
+    imageUpdate = app.image_update ?? null;
   }
 
   function suggestedId() {
@@ -318,11 +324,10 @@
   }
 
   onMount(() => {
-    let jobs: Record<string, AppJob> = {};
     if (!id) {
       syncYaml();
     } else {
-      loadApp(jobs)
+      loadApp()
         .then(() => {
           pane = stack.services.length > 1 ? 'services' : 'app';
           return loadLogs();
@@ -330,18 +335,26 @@
         .catch((e: Error) => (error = e.message));
     }
     const stop = subscribeAppJobs((next) => {
-      const prev = id ? jobs[id] : undefined;
       jobs = next;
       if (!id) return;
-      if (prev && !next[id]) {
-        refreshStatus(jobs)
-          .then(() => loadLogs())
-          .catch(() => {});
+      if (next[id]) {
+        status = overlayJob(status, next[id]);
         return;
       }
-      if (next[id]) status = overlayJob(status, next[id]);
+      if (isBusy(status.phase)) {
+        refreshStatus()
+          .then(() => loadLogs())
+          .catch(() => {});
+      }
     });
-    return stop;
+    const poll = setInterval(() => {
+      if (!id || !isBusy(status.phase)) return;
+      refreshStatus().catch(() => {});
+    }, 800);
+    return () => {
+      stop();
+      clearInterval(poll);
+    };
   });
 
   async function save(e: Event) {
@@ -374,7 +387,7 @@
       };
       if (id) {
         const app = await api<AppRecord>('/api/apps/' + id, { method: 'PUT', body: JSON.stringify(body) });
-        status = app.status;
+        status = mergeStatus(app.status, jobs[app.id]);
         if (app.app_dir) appDir = app.app_dir;
         if (app.status.installed) needsUpdate = true;
       } else {
@@ -400,8 +413,10 @@
     error = '';
     try {
       const app = await api<AppRecord>(`/api/apps/${id}/${kind}`, { method: 'POST' });
-      status = app.status;
+      status = mergeStatus(app.status, jobs[id]);
+      imageUpdate = app.image_update ?? null;
       if (kind === 'update' || kind === 'install' || kind === 'start') needsUpdate = false;
+      if (kind === 'update') imageUpdate = null;
     } catch (err: any) {
       error = err.message;
     } finally {
@@ -442,8 +457,16 @@
         {#if primary === 'install'}
           <InfoTip label="What Install does" text="Downloads the images, then starts the app. Large apps can take several minutes." />
         {:else if primary === 'update'}
-          <InfoTip label="What Update does" text="Downloads newer images and restarts this app." />
+          <InfoTip
+            label="What Update does"
+            text={imageUpdate?.available
+              ? `Downloads newer images${imageUpdate.images?.length ? ` (${imageUpdate.images.join(', ')})` : ''} and restarts this app.`
+              : 'Downloads newer images and restarts this app.'}
+          />
         {/if}
+      {/if}
+      {#if imageUpdate?.available && primary !== 'update' && status.installed}
+        <button class="btn secondary compact" disabled={!!busy || jobBusy} onclick={() => act('update')}>Update images</button>
       {/if}
       {#if status.running}
         <button class="btn secondary compact" disabled={!!busy || jobBusy} onclick={() => act('stop')}>Stop</button>
@@ -463,6 +486,9 @@
 {/if}
 {#if error}<div class="err">{error}</div>{/if}
 {#if notice}<p class="hint">{notice}</p>{/if}
+{#if imageUpdate?.available && !jobBusy}
+  <p class="hint">Newer images are ready{imageUpdate.images?.length ? `: ${imageUpdate.images.join(', ')}` : ''}. Update downloads them and restarts this app.</p>
+{/if}
 
 <div class="compose-io">
   <button type="button" class="btn secondary compact" onclick={() => importEl?.click()}>

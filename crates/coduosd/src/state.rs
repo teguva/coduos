@@ -6,10 +6,11 @@ use tokio::sync::{watch, RwLock};
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::docker::AppJob;
+use crate::docker::{AppJob, ImageUpdate};
 use crate::stats::{SummaryRx, SummaryTx};
 
 pub type AppJobsTx = watch::Sender<HashMap<String, AppJob>>;
+pub type ImageUpdates = Arc<RwLock<HashMap<String, ImageUpdate>>>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -19,6 +20,7 @@ pub struct AppState {
     pub summary_tx: SummaryTx,
     pub summary_rx: SummaryRx,
     pub jobs_tx: AppJobsTx,
+    pub image_updates: ImageUpdates,
     pub http: reqwest::Client,
 }
 

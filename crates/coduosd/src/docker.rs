@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -115,6 +115,15 @@ pub struct ContainerStatus {
     pub name: String,
     pub state: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImageUpdate {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+    #[serde(skip)]
+    pub checked_at: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -645,38 +654,161 @@ fn container_from_value(v: &serde_json::Value, id: &str) -> ContainerStatus {
     }
 }
 
-pub async fn images_present(apps_dir: &Path, id: &str) -> bool {
+pub async fn compose_image_refs(apps_dir: &Path, id: &str) -> Vec<String> {
     let Ok((ok, stdout, _)) = compose(apps_dir, id, &["config", "--images"]).await else {
-        return false;
+        return Vec::new();
     };
     if !ok {
-        return false;
+        return Vec::new();
     }
-    let images: Vec<&str> = stdout
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let img = line.trim();
+        if img.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|x: &String| x == img) {
+            out.push(img.to_string());
+        }
+    }
+    out
+}
+
+pub async fn images_present(apps_dir: &Path, id: &str) -> bool {
+    let images = compose_image_refs(apps_dir, id).await;
     if images.is_empty() {
         return false;
     }
     for img in images {
-        let mut cmd = Command::new("docker");
-        cmd.arg("image")
-            .arg("inspect")
-            .arg(img)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let ok = cmd
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !ok {
+        if !image_exists(&img).await {
             return false;
         }
     }
     true
+}
+
+pub async fn check_compose_updates(apps_dir: &Path, id: &str) -> ImageUpdate {
+    let mut newer = Vec::new();
+    for img in compose_image_refs(apps_dir, id).await {
+        if image_is_pinned(&img) {
+            continue;
+        }
+        match image_update_ready(&img).await {
+            Ok(true) => newer.push(short_image_name(&img)),
+            Ok(false) | Err(_) => {}
+        }
+    }
+    newer.sort();
+    newer.dedup();
+    ImageUpdate {
+        available: !newer.is_empty(),
+        images: newer,
+        checked_at: Instant::now(),
+    }
+}
+
+async fn image_exists(image: &str) -> bool {
+    docker_stdout(&["image", "inspect", image]).await.is_some()
+}
+
+async fn image_update_ready(image: &str) -> Result<bool, ()> {
+    let local = local_repo_digests(image).await.ok_or(())?;
+    if local.is_empty() {
+        return Err(());
+    }
+    let remote = remote_image_digest(image).await.ok_or(())?;
+    Ok(!local_has_digest(&local, &remote))
+}
+
+async fn local_repo_digests(image: &str) -> Option<Vec<String>> {
+    let raw = docker_stdout(&[
+        "image",
+        "inspect",
+        "--format",
+        "{{json .RepoDigests}}",
+        image,
+    ])
+    .await?;
+    serde_json::from_str(&raw).ok()
+}
+
+async fn remote_image_digest(image: &str) -> Option<String> {
+    if let Some(text) = docker_stdout(&["buildx", "imagetools", "inspect", image]).await {
+        if let Some(d) = parse_remote_digest(&text) {
+            return Some(d);
+        }
+    }
+    if let Some(text) = docker_stdout(&["manifest", "inspect", image]).await {
+        if let Some(d) = parse_remote_digest(&text) {
+            return Some(d);
+        }
+    }
+    None
+}
+
+async fn docker_stdout(args: &[&str]) -> Option<String> {
+    let mut cmd = Command::new("docker");
+    cmd.args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let out = tokio::time::timeout(Duration::from_secs(25), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn image_is_pinned(image: &str) -> bool {
+    let t = image.to_ascii_lowercase();
+    t.contains("@sha256:") || t.contains("@sha512:")
+}
+
+fn short_image_name(image: &str) -> String {
+    let base = image.split('@').next().unwrap_or(image);
+    let name = base.rsplit('/').next().unwrap_or(base);
+    match name.rsplit_once(':') {
+        Some((n, _)) if !n.is_empty() => n.to_string(),
+        _ => name.to_string(),
+    }
+}
+
+fn local_has_digest(repo_digests: &[String], remote: &str) -> bool {
+    let remote = remote.trim();
+    repo_digests.iter().any(|d| {
+        let d = d.trim();
+        d == remote
+            || d.rsplit_once('@')
+                .map(|(_, digest)| digest == remote)
+                .unwrap_or(false)
+    })
+}
+
+fn parse_remote_digest(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("Digest:") else {
+            continue;
+        };
+        let digest = rest.trim();
+        if digest.starts_with("sha256:") || digest.starts_with("sha512:") {
+            return Some(digest.to_string());
+        }
+    }
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    v.get("digest")
+        .or_else(|| v.pointer("/Descriptor/digest"))
+        .or_else(|| v.pointer("/manifest/digest"))
+        .and_then(|x| x.as_str())
+        .filter(|d| d.starts_with("sha256:") || d.starts_with("sha512:"))
+        .map(str::to_string)
 }
 
 fn compose_plugin_ok() -> bool {
@@ -1026,6 +1158,49 @@ x-coduos:
         let _ = std::fs::remove_dir_all(&root);
         assert!(moved);
         assert!(!leftover);
+    }
+
+    #[test]
+    fn image_pin_and_short_name() {
+        assert!(image_is_pinned(
+            "ghcr.io/immich-app/immich-server@sha256:abc"
+        ));
+        assert!(image_is_pinned(
+            "ghcr.io/immich-app/immich-server:v3@sha256:abc"
+        ));
+        assert!(!image_is_pinned(
+            "ghcr.io/immich-app/immich-server:release"
+        ));
+        assert_eq!(
+            short_image_name("ghcr.io/immich-app/immich-server:release"),
+            "immich-server"
+        );
+        assert_eq!(short_image_name("postgres:16"), "postgres");
+        assert_eq!(short_image_name("redis"), "redis");
+    }
+
+    #[test]
+    fn local_digest_matches_remote() {
+        let local = vec![
+            "ghcr.io/immich-app/immich-server@sha256:aaa".into(),
+            "ghcr.io/immich-app/immich-server@sha256:bbb".into(),
+        ];
+        assert!(local_has_digest(&local, "sha256:bbb"));
+        assert!(!local_has_digest(&local, "sha256:ccc"));
+    }
+
+    #[test]
+    fn parse_imagetools_digest() {
+        let text = "Name:      docker.io/library/alpine:latest\nMediaType: application/vnd.oci.image.index.v1+json\nDigest:    sha256:deadbeef\n";
+        assert_eq!(
+            parse_remote_digest(text).as_deref(),
+            Some("sha256:deadbeef")
+        );
+        let json = r#"{"Descriptor":{"digest":"sha256:cafebabe"}}"#;
+        assert_eq!(
+            parse_remote_digest(json).as_deref(),
+            Some("sha256:cafebabe")
+        );
     }
 }
 

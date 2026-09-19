@@ -4,6 +4,7 @@
   import {
     isBusy,
     isLaunchable,
+    mergeStatus,
     overlayJob,
     subscribeAppJobs,
     type AppJob,
@@ -85,6 +86,7 @@
   let netHist = $state<{ rx: number; tx: number }[]>([]);
   let cpuHist = $state<number[]>([]);
   let memHist = $state<number[]>([]);
+  let gpuHist = $state<number[]>([]);
   let query = $state('');
   let searchEl = $state<HTMLInputElement | null>(null);
   let powerConfirm = $state<'reboot' | 'shutdown' | null>(null);
@@ -137,6 +139,10 @@
   function recordHist(s: Summary) {
     cpuHist = [...cpuHist, s.cpu_percent].slice(-180);
     memHist = [...memHist, pct(s.mem_used, s.mem_total)].slice(-180);
+    const g = s.gpus?.[0];
+    if (g) {
+      gpuHist = [...gpuHist, g.util_percent ?? 0].slice(-180);
+    }
     const nets: Net[] = s.networks ?? [];
     const n =
       nets.find((x) => !x.virtual_iface && x.operstate === 'up') ||
@@ -167,23 +173,30 @@
       })
       .catch(() => {});
     let jobs: Record<string, AppJob> = {};
-    api<App[]>('/api/apps')
-      .then((a) => (apps = a.map((app) => ({ ...app, status: overlayJob(app.status, jobs[app.id]) }))))
-      .catch(() => {});
+    const paint = (list: App[]) =>
+      list.map((app) => ({ ...app, status: mergeStatus(app.status, jobs[app.id]) }));
+    const refreshApps = () =>
+      api<App[]>('/api/apps')
+        .then((a) => {
+          apps = paint(a);
+        })
+        .catch(() => {});
+    refreshApps();
     const unsubJobs = subscribeAppJobs((next) => {
-      const ended = Object.keys(jobs).filter((id) => !next[id]);
       jobs = next;
       apps = apps.map((app) =>
         next[app.id] ? { ...app, status: overlayJob(app.status, next[app.id]) } : app
       );
-      if (ended.length) {
-        api<App[]>('/api/apps')
-          .then((a) => {
-            apps = a.map((app) => ({ ...app, status: overlayJob(app.status, jobs[app.id]) }));
-          })
-          .catch(() => {});
+      if (apps.some((app) => isBusy(app.status.phase) && !next[app.id])) {
+        refreshApps();
       }
     });
+    const poll = setInterval(() => {
+      if (apps.some((app) => isBusy(app.status.phase))) refreshApps();
+    }, 800);
+    const idlePoll = setInterval(() => {
+      if (!apps.some((app) => isBusy(app.status.phase))) refreshApps();
+    }, 45000);
     const c = setInterval(() => (now = new Date()), 1000);
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key !== '/' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
@@ -199,6 +212,8 @@
       es.close();
       unsubJobs();
       clearInterval(c);
+      clearInterval(poll);
+      clearInterval(idlePoll);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('coduos-theme', onTheme);
     };
@@ -308,6 +323,9 @@
                   gpu.mem_used != null && gpu.mem_total ? `${bytes(gpu.mem_used)} / ${bytes(gpu.mem_total)}` : null
                 ])}
               </div>
+              {#if gpuHist.length > 1}
+                <div class="widget-spark"><Sparkline rx={gpuHist} tx={[]} /></div>
+              {/if}
             </div>
           </button>
         {/if}
@@ -456,6 +474,9 @@
               aria-label="{app.name} settings"
             >
               <StatusPill status={app.status} />
+              {#if app.image_update?.available && !isBusy(app.status.phase)}
+                <span class="update-chip">Update</span>
+              {/if}
             </button>
           </div>
         {/each}

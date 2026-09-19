@@ -34,6 +34,7 @@ export type AppRecord = {
   created_at?: string;
   app_dir?: string;
   status: AppStatus;
+  image_update?: { available: boolean; images?: string[] } | null;
 };
 
 export function overlayJob(status: AppStatus, job?: AppJob | null): AppStatus {
@@ -49,6 +50,13 @@ export function overlayJob(status: AppStatus, job?: AppJob | null): AppStatus {
 
 export function isBusy(phase: AppPhase) {
   return phase === 'installing' || phase === 'starting' || phase === 'updating';
+}
+
+/** Live job overlay. Ignore a stale Starting/Updating job once the server is idle. */
+export function mergeStatus(status: AppStatus, job?: AppJob | null): AppStatus {
+  if (!job) return status;
+  if (!isBusy(status.phase)) return status;
+  return overlayJob(status, job);
 }
 
 export function isLaunchable(status: AppStatus) {
@@ -86,15 +94,20 @@ export function errorTip(status: AppStatus): string {
   return 'Something went wrong. See logs for the full output.';
 }
 
+function parseJobMap(raw: string): Record<string, AppJob> {
+  try {
+    const data = JSON.parse(raw);
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      return data as Record<string, AppJob>;
+    }
+  } catch {
+    /* ignore */
+  }
+  return {};
+}
+
 export function subscribeAppJobs(onJobs: (jobs: Record<string, AppJob>) => void): () => void {
   const es = new EventSource('/api/apps/stream', { withCredentials: true });
-  es.onmessage = (ev) => {
-    try {
-      const data = JSON.parse(ev.data);
-      onJobs(data && typeof data === 'object' ? data : {});
-    } catch {
-      /* ignore */
-    }
-  };
+  es.onmessage = (ev) => onJobs(parseJobMap(ev.data));
   return () => es.close();
 }

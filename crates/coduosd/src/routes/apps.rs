@@ -3,7 +3,9 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
+use axum::http::header::{HeaderValue, CACHE_CONTROL};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
@@ -13,7 +15,7 @@ use tokio_stream::StreamExt;
 
 use crate::config::{slugify, valid_id};
 use crate::db::AppRow;
-use crate::docker::{self, AppJob, AppPhase, ComposeStatus, PullProgress};
+use crate::docker::{self, AppJob, AppPhase, ComposeStatus, ImageUpdate, PullProgress};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -42,6 +44,8 @@ struct AppOut {
     created_at: String,
     app_dir: String,
     status: ComposeStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_update: Option<ImageUpdate>,
 }
 
 #[derive(Deserialize)]
@@ -53,7 +57,12 @@ struct AppIn {
     web_port: Option<i64>,
 }
 
-fn to_out(row: AppRow, status: ComposeStatus, app_dir: String) -> AppOut {
+fn to_out(
+    row: AppRow,
+    status: ComposeStatus,
+    app_dir: String,
+    image_update: Option<ImageUpdate>,
+) -> AppOut {
     AppOut {
         id: row.id,
         name: row.name,
@@ -63,7 +72,18 @@ fn to_out(row: AppRow, status: ComposeStatus, app_dir: String) -> AppOut {
         created_at: row.created_at,
         app_dir,
         status,
+        image_update,
     }
+}
+
+async fn cached_update(state: &AppState, id: &str) -> Option<ImageUpdate> {
+    state
+        .image_updates
+        .read()
+        .await
+        .get(id)
+        .filter(|u| u.available)
+        .cloned()
 }
 
 async fn load_app(state: &AppState, id: &str) -> Result<AppOut, ApiError> {
@@ -76,7 +96,8 @@ async fn load_app(state: &AppState, id: &str) -> Result<AppOut, ApiError> {
     if let Some(job) = state.job(id) {
         status = job.overlay(status);
     }
-    Ok(to_out(row, status, app_dir))
+    let image_update = cached_update(state, id).await;
+    Ok(to_out(row, status, app_dir, image_update))
 }
 
 fn busy_conflict() -> ApiError {
@@ -113,7 +134,8 @@ async fn list(State(state): State<AppState>, jar: CookieJar) -> Result<Json<Vec<
             status = job.overlay(status);
         }
         let app_dir = apps_dir.join(&row.id).display().to_string();
-        out.push(to_out(row, status, app_dir));
+        let image_update = cached_update(&state, &row.id).await;
+        out.push(to_out(row, status, app_dir, image_update));
     }
     Ok(Json(out))
 }
@@ -124,22 +146,30 @@ async fn get_one(
     Path(id): Path<String>,
 ) -> Result<Json<AppOut>, ApiError> {
     current_user(&state, &jar).await?;
+    maybe_kick_image_check(&state, &id);
     Ok(Json(load_app(&state, &id).await?))
 }
 
 async fn stream(
     State(state): State<AppState>,
     jar: CookieJar,
-) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+) -> Result<Response, ApiError> {
     current_user(&state, &jar).await?;
     let rx = state.jobs_tx.subscribe();
     let s = WatchStream::new(rx).map(|jobs: HashMap<String, AppJob>| {
         match Event::default().json_data(jobs) {
-            Ok(ev) => Ok(ev),
+            Ok(ev) => Ok::<Event, Infallible>(ev),
             Err(_) => Ok(Event::default().data("{}")),
         }
     });
-    Ok(Sse::new(s).keep_alive(KeepAlive::default()))
+    let mut resp = Sse::new(s)
+        .keep_alive(KeepAlive::default())
+        .into_response();
+    resp.headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    resp.headers_mut()
+        .insert("X-Accel-Buffering", HeaderValue::from_static("no"));
+    Ok(resp)
 }
 
 async fn create(
@@ -422,6 +452,15 @@ async fn run_job(state: AppState, id: String, kind: JobKind) {
             let _ = state.db.set_last_error(&id, None);
             wait_for_app_ready(&state, &id).await;
             state.clear_job(&id);
+            if matches!(kind, JobKind::Install | JobKind::Update) {
+                state.image_updates.write().await.remove(&id);
+                let recheck = state.clone();
+                let recheck_id = id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    refresh_one_image_update(&recheck, &recheck_id).await;
+                });
+            }
         }
         Ok((false, log)) => fail_job(&state, &apps_dir, &id, &log),
         Err(err) => fail_job(&state, &apps_dir, &id, &err.to_string()),
@@ -453,6 +492,66 @@ fn fail_job(state: &AppState, apps_dir: &std::path::Path, id: &str, raw: &str) {
     docker::write_job_log(apps_dir, id, raw);
     let _ = state.db.set_last_error(id, Some(&err));
     state.clear_job(id);
+}
+
+const IMAGE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 3600);
+
+pub(crate) fn spawn_image_checker(state: AppState) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        loop {
+            refresh_all_image_updates(&state).await;
+            tokio::time::sleep(IMAGE_CHECK_INTERVAL).await;
+        }
+    });
+}
+
+fn maybe_kick_image_check(state: &AppState, id: &str) {
+    let state = state.clone();
+    let id = id.to_string();
+    tokio::spawn(async move {
+        let stale = {
+            let map = state.image_updates.read().await;
+            match map.get(&id) {
+                None => true,
+                Some(u) => u.checked_at.elapsed() > IMAGE_CHECK_INTERVAL,
+            }
+        };
+        if stale {
+            refresh_one_image_update(&state, &id).await;
+        }
+    });
+}
+
+async fn refresh_all_image_updates(state: &AppState) {
+    let Ok(rows) = state.db.list_apps() else {
+        return;
+    };
+    let cfg = state.config.read().await;
+    let apps_dir = cfg.apps_dir();
+    drop(cfg);
+    for row in rows {
+        if state.job(&row.id).is_some() {
+            continue;
+        }
+        let upd = docker::check_compose_updates(&apps_dir, &row.id).await;
+        state.image_updates.write().await.insert(row.id, upd);
+    }
+}
+
+async fn refresh_one_image_update(state: &AppState, id: &str) {
+    if state.job(id).is_some() {
+        return;
+    }
+    let cfg = state.config.read().await;
+    let apps_dir = cfg.apps_dir();
+    drop(cfg);
+    let upd = docker::check_compose_updates(&apps_dir, id).await;
+    state
+        .image_updates
+        .write()
+        .await
+        .insert(id.to_string(), upd);
 }
 
 #[derive(Deserialize)]

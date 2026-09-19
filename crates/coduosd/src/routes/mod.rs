@@ -36,3 +36,7 @@ pub fn router() -> Router<AppState> {
 pub async fn current_user(state: &AppState, jar: &CookieJar) -> Result<UserRow, ApiError> {
     auth::require_user(state, auth::cookie_token(jar).as_deref()).await
 }
+
+pub fn spawn_image_checker(state: AppState) {
+    apps::spawn_image_checker(state);
+}

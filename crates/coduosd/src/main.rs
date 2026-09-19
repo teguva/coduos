@@ -96,9 +96,11 @@ async fn main() -> Result<()> {
         summary_tx,
         summary_rx,
         jobs_tx,
+        image_updates: Arc::new(RwLock::new(HashMap::new())),
         http,
     };
     ddns::spawn_updater(state.clone());
+    routes::spawn_image_checker(state.clone());
 
     let app = Router::new()
         .nest("/api", routes::router())
