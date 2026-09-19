@@ -123,6 +123,58 @@ impl Default for SystemSummary {
     }
 }
 
+struct IntelGpuPmu {
+    opened: bool,
+    counters: Vec<PmuCounter>,
+}
+
+struct PmuCounter {
+    key: String,
+    fd: i32,
+}
+
+impl Default for IntelGpuPmu {
+    fn default() -> Self {
+        Self {
+            opened: false,
+            counters: Vec::new(),
+        }
+    }
+}
+
+impl Drop for IntelGpuPmu {
+    fn drop(&mut self) {
+        for c in &self.counters {
+            unsafe {
+                libc::close(c.fd);
+            }
+        }
+    }
+}
+
+impl IntelGpuPmu {
+    fn ensure(&mut self) {
+        if self.opened {
+            return;
+        }
+        self.opened = true;
+        self.counters = open_intel_pmu_counters();
+        if !self.counters.is_empty() {
+            tracing::info!("i915/xe PMU: {} GPU busy counters", self.counters.len());
+        }
+    }
+
+    fn sample(&self) -> HashMap<String, u64> {
+        let mut out = HashMap::new();
+        for c in &self.counters {
+            if let Some(ns) = read_pmu_u64(c.fd) {
+                out.insert(c.key.clone(), ns);
+            }
+        }
+        out
+    }
+}
+
 const TICK: Duration = Duration::from_millis(1000);
 const DOCKER_TTL: Duration = Duration::from_secs(15);
 const DISK_TTL: Duration = Duration::from_secs(5);
@@ -139,6 +191,7 @@ struct Collector {
     prev_gpu_engine_at: Option<Instant>,
     prev_gpu_rapl_uj: Option<u64>,
     prev_gpu_rapl_at: Option<Instant>,
+    intel_pmu: IntelGpuPmu,
     docker: DockerInfo,
     docker_at: Option<Instant>,
     disk_infos: Vec<DiskInfo>,
@@ -160,6 +213,7 @@ pub fn spawn_collector(tx: tokio::sync::watch::Sender<SystemSummary>) {
             prev_gpu_engine_at: None,
             prev_gpu_rapl_uj: None,
             prev_gpu_rapl_at: None,
+            intel_pmu: IntelGpuPmu::default(),
             docker: DockerInfo {
                 available: false,
                 version: None,
@@ -434,14 +488,28 @@ impl Collector {
             if power_w.is_none() && vendor == "intel" {
                 power_w = gpu_rapl;
             }
-            let engines = intel_engine_busy_ns(&card, &dev);
+            let mut engines = intel_engine_busy_ns(&card, &dev);
+            if vendor == "intel" {
+                self.intel_pmu.ensure();
+                engines.extend(self.intel_pmu.sample());
+            }
             for (eng, ns) in &engines {
                 next_engines.insert(format!("{name}/{eng}"), *ns);
             }
             let mut util = gpu_busy(&dev, &card);
-            if util.is_none() {
-                if let Some(elapsed) = dt {
-                    util = intel_util_percent(&name, &engines, &self.prev_gpu_engine, elapsed);
+            if let Some(elapsed) = dt {
+                util = max_util(
+                    util,
+                    intel_util_percent(&name, &engines, &self.prev_gpu_engine, elapsed),
+                );
+                if vendor == "intel" {
+                    if let Some(rc6) = intel_rc6_residency_ms(&card) {
+                        let key = format!("{name}/rc6");
+                        if let Some(prev) = self.prev_gpu_engine.get(&key).copied() {
+                            util = max_util(util, rc6_awake_percent(rc6.saturating_sub(prev), elapsed));
+                        }
+                        next_engines.insert(key, rc6);
+                    }
                 }
             }
             let mem_used = sysfs_u64(&dev.join("mem_info_vram_used"));
@@ -885,9 +953,33 @@ fn gpu_busy(dev: &PathBuf, card: &PathBuf) -> Option<f32> {
         })
 }
 
-fn engine_is_primary(name: &str) -> bool {
+fn max_util(a: Option<f32>, b: Option<f32>) -> Option<f32> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
+fn engine_is_busy_counter(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    n.contains("rcs") || n.contains("ccs") || n.contains("render") || n.contains("compute")
+    if n.contains("wait") || n.contains("sema") {
+        return false;
+    }
+    n.ends_with("-busy")
+        || n.contains("rcs")
+        || n.contains("ccs")
+        || n.contains("vcs")
+        || n.contains("vecs")
+        || n.contains("bcs")
+        || n.contains("render")
+        || n.contains("compute")
+        || n.contains("video")
+        || n.contains("copy")
+        || n.contains("blitter")
+        || n == "gt-awake"
+        || n.contains("gt-awake")
+        || n.contains("awake-time")
 }
 
 fn busy_pct(delta_ns: u64, elapsed_ns: u64) -> f32 {
@@ -979,10 +1071,9 @@ fn intel_util_percent(
     if elapsed_ns < 300_000_000 {
         return None;
     }
-    let has_primary = now.keys().any(|k| engine_is_primary(k));
     let mut best: Option<f32> = None;
     for (eng, ns) in now {
-        if has_primary && !engine_is_primary(eng) {
+        if !engine_is_busy_counter(eng) {
             continue;
         }
         let key = format!("{card}/{eng}");
@@ -993,6 +1084,154 @@ fn intel_util_percent(
         best = Some(best.map_or(pct, |b| b.max(pct)));
     }
     best
+}
+
+fn intel_rc6_residency_ms(card: &Path) -> Option<u64> {
+    let direct = [
+        card.join("gt/gt0/rc6_residency_ms"),
+        card.join("gt/gt1/rc6_residency_ms"),
+        card.join("gt/rc6_residency_ms"),
+        card.join("device/power/rc6_residency_ms"),
+        card.join("power/rc6_residency_ms"),
+    ];
+    for p in direct {
+        if let Some(v) = sysfs_u64(&p) {
+            return Some(v);
+        }
+    }
+    let gt = card.join("gt");
+    if let Ok(entries) = std::fs::read_dir(gt) {
+        for ent in entries.flatten() {
+            let p = ent.path().join("rc6_residency_ms");
+            if let Some(v) = sysfs_u64(&p) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn rc6_awake_percent(delta_ms: u64, elapsed: Duration) -> Option<f32> {
+    let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+    if elapsed_ms < 300.0 {
+        return None;
+    }
+    let idle = (delta_ms as f64 / elapsed_ms).clamp(0.0, 1.0);
+    Some(((1.0 - idle) * 100.0) as f32)
+}
+
+fn parse_pmu_config(text: &str) -> Option<u64> {
+    for key in ["config=", "event="] {
+        let Some(idx) = text.find(key) else {
+            continue;
+        };
+        let rest = text[idx + key.len()..].trim();
+        let token: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit() || *c == 'x' || *c == 'X')
+            .collect();
+        if token.is_empty() {
+            continue;
+        }
+        if let Some(hex) = token.strip_prefix("0x").or_else(|| token.strip_prefix("0X")) {
+            if let Ok(v) = u64::from_str_radix(hex, 16) {
+                return Some(v);
+            }
+        } else if let Ok(v) = token.parse() {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn pmu_event_wanted(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    if n.ends_with(".unit") {
+        return false;
+    }
+    n.ends_with("-busy") || n == "software-gt-awake-time" || n.ends_with("gt-awake-time")
+}
+
+fn open_intel_pmu_counters() -> Vec<PmuCounter> {
+    let mut out = Vec::new();
+    let Ok(devs) = std::fs::read_dir("/sys/bus/event_source/devices") else {
+        return out;
+    };
+    for ent in devs.flatten() {
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("i915") || name.starts_with("xe")) {
+            continue;
+        }
+        let dir = ent.path();
+        let Ok(pmu_type) = sysfs_trim(&dir.join("type").display().to_string()).parse::<u32>() else {
+            continue;
+        };
+        let events = dir.join("events");
+        let Ok(evs) = std::fs::read_dir(&events) else {
+            continue;
+        };
+        for ev in evs.flatten() {
+            let ev_name = ev.file_name();
+            let ev_name = ev_name.to_string_lossy();
+            if !pmu_event_wanted(&ev_name) {
+                continue;
+            }
+            let cfg_text = sysfs_trim(&ev.path().display().to_string());
+            let Some(config) = parse_pmu_config(&cfg_text) else {
+                continue;
+            };
+            let Some(fd) = perf_open(pmu_type, config) else {
+                continue;
+            };
+            let key = if ev_name == "software-gt-awake-time" {
+                "gt-awake".into()
+            } else {
+                ev_name.into_owned()
+            };
+            out.push(PmuCounter { key, fd });
+        }
+    }
+    out
+}
+
+fn read_pmu_u64(fd: i32) -> Option<u64> {
+    let mut buf = 0u64;
+    let n = unsafe { libc::read(fd, &mut buf as *mut u64 as *mut libc::c_void, 8) };
+    if n == 8 {
+        Some(buf)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn perf_open(pmu_type: u32, config: u64) -> Option<i32> {
+    const PERF_FLAG_FD_CLOEXEC: libc::c_ulong = 0x8;
+    let mut attr = [0u8; 136];
+    attr[0..4].copy_from_slice(&pmu_type.to_ne_bytes());
+    attr[4..8].copy_from_slice(&136u32.to_ne_bytes());
+    attr[8..16].copy_from_slice(&config.to_ne_bytes());
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_perf_event_open,
+            attr.as_mut_ptr(),
+            -1i64,
+            0i64,
+            -1i64,
+            PERF_FLAG_FD_CLOEXEC as i64,
+        )
+    };
+    if fd < 0 {
+        None
+    } else {
+        Some(fd as i32)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn perf_open(_pmu_type: u32, _config: u64) -> Option<i32> {
+    None
 }
 
 fn rapl_energy_uj(want: &[&str]) -> Option<u64> {
@@ -1121,12 +1360,35 @@ mod tests {
 
     #[test]
     fn intel_engine_busy_pct() {
+        use std::time::Duration;
         assert!((super::busy_pct(1_000_000_000, 1_000_000_000) - 100.0).abs() < 0.01);
         assert!((super::busy_pct(200_000_000, 1_000_000_000) - 20.0).abs() < 0.01);
         assert_eq!(super::busy_pct(0, 1_000_000_000), 0.0);
-        assert!(super::engine_is_primary("rcs0"));
-        assert!(super::engine_is_primary("ccs0"));
-        assert!(!super::engine_is_primary("bcs0"));
+        assert!(super::engine_is_busy_counter("rcs0"));
+        assert!(super::engine_is_busy_counter("ccs0"));
+        assert!(super::engine_is_busy_counter("vcs0-busy"));
+        assert!(super::engine_is_busy_counter("vcs1"));
+        assert!(super::engine_is_busy_counter("vecs0"));
+        assert!(super::engine_is_busy_counter("bcs0"));
+        assert!(super::engine_is_busy_counter("gt-awake"));
+        assert!(super::engine_is_busy_counter("software-gt-awake-time"));
+        assert!(!super::engine_is_busy_counter("rcs0-wait"));
+        assert!(!super::engine_is_busy_counter("rc6"));
+        let awake = super::rc6_awake_percent(0, Duration::from_secs(1)).unwrap();
+        assert!((awake - 100.0).abs() < 0.01);
+        let idle = super::rc6_awake_percent(1000, Duration::from_secs(1)).unwrap();
+        assert!(idle.abs() < 0.5);
+        assert_eq!(super::parse_pmu_config("config=0x2000"), Some(0x2000));
+        assert_eq!(super::parse_pmu_config("event=0x00"), Some(0));
+        assert_eq!(super::max_util(Some(10.0), Some(40.0)), Some(40.0));
+        let mut now = std::collections::HashMap::new();
+        now.insert("vcs0-busy".into(), 1_400_000_000);
+        now.insert("rcs0-busy".into(), 50_000_000);
+        let mut prev = std::collections::HashMap::new();
+        prev.insert("card0/vcs0-busy".into(), 400_000_000);
+        prev.insert("card0/rcs0-busy".into(), 0);
+        let u = super::intel_util_percent("card0", &now, &prev, Duration::from_secs(1)).unwrap();
+        assert!((u - 100.0).abs() < 0.01);
     }
 
     #[test]

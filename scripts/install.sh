@@ -80,6 +80,96 @@ pkg_install_any() {
   return 1
 }
 
+# App installs pass `docker compose --progress json` (Compose 2.29+). Debian's
+# docker-compose 2.26 rejects that flag, so distro packages are not enough.
+COMPOSE_MIN="2.29.0"
+COMPOSE_PLUGIN_VERSION="${CODUOS_COMPOSE_VERSION:-v2.40.3}"
+
+compose_short_version() {
+  docker compose version --short 2>/dev/null | sed -E 's/^v//; s/[-+].*$//' || true
+}
+
+# $1 >= $2 as dotted numbers (2.26.1 vs 2.29.0).
+version_ge() {
+  local IFS=.
+  local -a a=() b=()
+  local i x y
+  read -r -a a <<<"${1}"
+  read -r -a b <<<"${2}"
+  for i in 0 1 2; do
+    x="${a[i]:-0}"
+    y="${b[i]:-0}"
+    x="${x%%[^0-9]*}"
+    y="${y%%[^0-9]*}"
+    x="${x:-0}"
+    y="${y:-0}"
+    if ((10#$x > 10#$y)); then
+      return 0
+    fi
+    if ((10#$x < 10#$y)); then
+      return 1
+    fi
+  done
+  return 0
+}
+
+compose_asset_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo x86_64 ;;
+    aarch64|arm64) echo aarch64 ;;
+    armv7l|armv7) echo armv7 ;;
+    *) return 1 ;;
+  esac
+}
+
+install_compose_plugin() {
+  local arch dest tmp url ver
+  arch=$(compose_asset_arch) || {
+    echo "warning: no Docker Compose plugin for $(uname -m)" >&2
+    return 1
+  }
+  ver="${COMPOSE_PLUGIN_VERSION}"
+  url="https://github.com/docker/compose/releases/download/${ver}/docker-compose-linux-${arch}"
+  dest=/usr/local/lib/docker/cli-plugins
+  echo "Installing Docker Compose ${ver} (${arch}) for app install progress…"
+  install -d "${dest}"
+  tmp=$(mktemp)
+  if ! curl -fL --progress-bar -o "${tmp}" "${url}"; then
+    rm -f "${tmp}"
+    echo "Could not download ${url}" >&2
+    return 1
+  fi
+  chmod 0755 "${tmp}"
+  mv -f "${tmp}" "${dest}/docker-compose"
+}
+
+ensure_docker_compose() {
+  if ! command -v docker >/dev/null 2>&1; then
+    return 0
+  fi
+  local have
+  have=$(compose_short_version)
+  if [[ -n "${have}" ]] && version_ge "${have}" "${COMPOSE_MIN}"; then
+    echo "Docker Compose ${have} (>= ${COMPOSE_MIN})"
+    return 0
+  fi
+  if [[ -n "${have}" ]]; then
+    echo "Docker Compose ${have} is too old for app installs (need ${COMPOSE_MIN}+)."
+  else
+    echo "Docker Compose plugin is missing."
+  fi
+  if ! install_compose_plugin; then
+    echo "Apps need Docker Compose ${COMPOSE_MIN}+ (--progress json). Distro packages are not new enough." >&2
+    return 1
+  fi
+  have=$(compose_short_version)
+  echo "Docker Compose ${have:-unknown}"
+  if [[ -z "${have}" ]] || ! version_ge "${have}" "${COMPOSE_MIN}"; then
+    echo "Docker Compose is still older than ${COMPOSE_MIN}" >&2
+    return 1
+  fi
+}
+
 ask_yes() {
   local prompt="$1"
   local default="${2:-y}"
@@ -456,25 +546,23 @@ if [[ "${WITH_DOCKER}" -eq 1 ]]; then
   case "${PM}" in
     apt)
       pkg_install_any docker.io docker-ce docker
-      pkg_install_any docker-compose-v2 docker-compose-plugin
+      pkg_install_any docker-compose-v2 docker-compose-plugin docker-compose || true
       ;;
     pacman)
       pkg_install docker
-      pkg_install_any docker-compose docker-compose-plugin
+      pkg_install_any docker-compose docker-compose-plugin || true
       ;;
     dnf)
       pkg_install_any docker docker-ce moby-engine
-      pkg_install_any docker-compose-plugin docker-compose
+      pkg_install_any docker-compose-plugin docker-compose || true
       ;;
     apk)
       pkg_install docker
-      pkg_install_any docker-cli-compose docker-compose
+      pkg_install_any docker-cli-compose docker-compose || true
       ;;
     *) echo "Install Docker yourself, then re-run." >&2 ;;
   esac
-  if ! docker compose version >/dev/null 2>&1; then
-    echo "warning: Docker Compose v2 is not installed; Apps need the docker-compose-v2 (or docker-compose-plugin) package" >&2
-  fi
+  ensure_docker_compose
 fi
 if [[ "${WITH_NGINX}" -eq 1 ]]; then
   pkg_install nginx

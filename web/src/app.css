@@ -574,17 +574,19 @@ pre.logs {
 .spark-fill {
   fill: color-mix(in srgb, var(--rx) 22%, transparent);
 }
-.spark-rx {
-  stroke: var(--rx);
-  stroke-width: 1.6;
+.spark-rx,
+.spark-tx {
+  vector-effect: non-scaling-stroke;
   stroke-linejoin: round;
   stroke-linecap: round;
 }
+.spark-rx {
+  stroke: var(--rx);
+  stroke-width: 1.6px;
+}
 .spark-tx {
   stroke: var(--tx);
-  stroke-width: 1.4;
-  stroke-linejoin: round;
-  stroke-linecap: round;
+  stroke-width: 1.4px;
   opacity: 0.9;
 }
 .gauge span {

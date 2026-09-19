@@ -1,7 +1,7 @@
 # CoduOS feature packages. Keep in sync with crates/coduosd/src/packages.rs
 # package[,alt...]|check|reason
-# check is a PATH binary, or "docker compose version" for the Compose v2 plugin.
+# check is a PATH binary, or "docker compose version" for Compose 2.29+.
 parted|parted|Format a whole disk
 e2fsprogs|mkfs.ext4|Format ext4 volumes
 openssl|openssl|HTTPS certificates and LAN CA
-docker-compose-v2,docker-compose-plugin,docker-compose,docker-cli-compose|docker compose version|Docker Compose for apps
+docker-compose-v2,docker-compose-plugin,docker-compose,docker-cli-compose|docker compose version|Docker Compose 2.29+ for app installs

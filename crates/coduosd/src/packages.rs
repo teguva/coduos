@@ -1,3 +1,6 @@
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Stdio;
 
 use serde::Serialize;
@@ -9,6 +12,9 @@ use crate::util;
 /// tarball wins so an update can install packages the old binary did not know.
 const DEPS_TEXT: &str = include_str!("../../../packaging/deps");
 const DEPS_PATH: &str = "/usr/share/coduos/deps";
+const COMPOSE_MIN: (u32, u32, u32) = (2, 29, 0);
+const COMPOSE_PLUGIN_VERSION: &str = "v2.40.3";
+const COMPOSE_PLUGIN_DIR: &str = "/usr/local/lib/docker/cli-plugins";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dep {
@@ -83,6 +89,9 @@ pub fn parse_deps(text: &str) -> Vec<Dep> {
 }
 
 pub fn command_present(command: &str) -> bool {
+    if is_compose_check(command) {
+        return compose_meets_min();
+    }
     let mut parts = command.split_whitespace();
     let Some(bin) = parts.next() else {
         return false;
@@ -98,6 +107,107 @@ pub fn command_present(command: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn is_compose_check(command: &str) -> bool {
+    command == "docker compose version"
+}
+
+fn compose_meets_min() -> bool {
+    compose_short_version()
+        .as_deref()
+        .is_some_and(compose_version_ok)
+}
+
+fn compose_short_version() -> Option<String> {
+    let out = std::process::Command::new("docker")
+        .args(["compose", "version", "--short"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn parse_compose_version(raw: &str) -> Option<(u32, u32, u32)> {
+    let s = raw.trim().trim_start_matches('v');
+    let s = s.split(['-', '+']).next().unwrap_or(s);
+    let mut parts = s.split('.');
+    let major = parts.next()?.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()?;
+    let minor = parts
+        .next()
+        .map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+        .filter(|p| !p.is_empty())
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    let patch = parts
+        .next()
+        .map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+        .filter(|p| !p.is_empty())
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+fn compose_version_ok(raw: &str) -> bool {
+    parse_compose_version(raw).is_some_and(|v| v >= COMPOSE_MIN)
+}
+
+fn compose_download_arch() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some("x86_64"),
+        "aarch64" => Some("aarch64"),
+        "arm" => Some("armv7"),
+        _ => None,
+    }
+}
+
+fn install_compose_plugin() -> Result<(), String> {
+    let ver = std::env::var("CODUOS_COMPOSE_VERSION")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| COMPOSE_PLUGIN_VERSION.to_string());
+    let arch = compose_download_arch().ok_or_else(|| {
+        format!("no Docker Compose plugin for {}", std::env::consts::ARCH)
+    })?;
+    let url = format!(
+        "https://github.com/docker/compose/releases/download/{ver}/docker-compose-linux-{arch}"
+    );
+    tracing::info!("installing Docker Compose {ver} ({arch})");
+    fs::create_dir_all(COMPOSE_PLUGIN_DIR).map_err(|err| format!("{COMPOSE_PLUGIN_DIR}: {err}"))?;
+    let dest = Path::new(COMPOSE_PLUGIN_DIR).join("docker-compose");
+    let tmp = dest.with_extension("new");
+    let out = std::process::Command::new("curl")
+        .args(["-fL", "--progress-bar", "-o"])
+        .arg(&tmp)
+        .arg(&url)
+        .output()
+        .map_err(|err| format!("curl: {err}"))?;
+    if !out.status.success() {
+        let _ = fs::remove_file(&tmp);
+        let err = String::from_utf8_lossy(&out.stderr);
+        let msg = err.trim();
+        return Err(if msg.is_empty() {
+            format!("could not download {url}")
+        } else {
+            format!("could not download {url}: {msg}")
+        });
+    }
+    let mut perms = fs::metadata(&tmp)
+        .map_err(|err| format!("{}: {err}", tmp.display()))?
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&tmp, perms).map_err(|err| format!("{}: {err}", tmp.display()))?;
+    fs::rename(&tmp, &dest).map_err(|err| format!("{}: {err}", dest.display()))?;
+    Ok(())
 }
 
 pub fn status() -> Vec<PackageStatus> {
@@ -195,6 +305,15 @@ fn install_dep(dep: &Dep) -> Result<(), String> {
                     return Ok(());
                 }
                 last = format!("{name} installed but {} still missing", dep.command);
+            }
+            Err(err) => last = err,
+        }
+    }
+    if is_compose_check(&dep.command) {
+        match install_compose_plugin() {
+            Ok(()) if command_present(&dep.command) => return Ok(()),
+            Ok(()) => {
+                last = "Docker Compose plugin is still older than 2.29".into();
             }
             Err(err) => last = err,
         }
@@ -319,7 +438,18 @@ mod tests {
         let compose = list.iter().find(|d| d.name() == "docker-compose-v2").unwrap();
         assert!(compose.names.contains(&"docker-compose-plugin".into()));
         assert_eq!(compose.command, "docker compose version");
+        assert!(compose.reason.contains("2.29"));
         assert!(list.iter().all(|d| !d.command.is_empty() && !d.reason.is_empty()));
+    }
+
+    #[test]
+    fn compose_version_requires_2_29() {
+        assert!(!compose_version_ok("2.26.1-4"));
+        assert!(!compose_version_ok("2.28.1"));
+        assert!(compose_version_ok("2.29.0"));
+        assert!(compose_version_ok("v2.40.3"));
+        assert!(compose_version_ok("5.5.1"));
+        assert_eq!(parse_compose_version("2.26.1-4"), Some((2, 26, 1)));
     }
 
     #[test]
